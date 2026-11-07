@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "versionCode": 31,
+  "versionName": "3.2",
+  "forceUpdate": false,
+  "title": "雨课堂助手 3.2",
+  "description": "GitHub 版启用有道云静默更新检测，支持强制更新，保留二维码登录修复与脱敏诊断日志。",
+  "downloadUrl": "",
+  "githubUrl": "",
+  "author": "FirmPluvia",
+  "projectUrl": "https://github.com/FirmPluvia/ykt_assistant"
+}

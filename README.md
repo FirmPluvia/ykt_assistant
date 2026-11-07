@@ -1,8 +1,8 @@
 # 雨课堂助手 · ykt_assistant
 
-Android 8.0+ 原生直连客户端，版本 **3.0（versionCode 26）**。
+Android 8.0+ 原生直连客户端，版本 **3.2（versionCode 31）**。
 
-> **开源范围声明：本仓库仅开源 3.0 版本源码，后续版本不再开源。** 请以本仓库内容为准，不要将其与后续闭源版本混淆。
+> **源码同步范围：本仓库同步 3.2 版本源码。** 功能、构建、更新检测和诊断说明以 3.2 为准。
 
 ## 两大核心
 
@@ -14,7 +14,9 @@ Android 8.0+ 原生直连客户端，版本 **3.0（versionCode 26）**。
 - **课堂凭证后台静默查询**：优先复用本地凭证，快速命中直接入课；只有超过 500ms 才显示可取消的等待提示，不卡界面。
 - **缺少凭证时确认签到并进入课堂**，签到、入课一步完成。
 - **返回、切换页面或退出账号**，会取消待显示提示和迟到入课，不留半截状态。
-- 支持标准、荷塘、长江、黄河四种雨课堂服务；二维码登录、切换服务、刷新确认、退出账号。
+- 支持标准、荷塘、长江、黄河四种雨课堂服务；二维码、手机号 / 邮箱密码、短信验证码登录，支持切换和取消。
+- 官方腾讯验证由用户手动完成，使用全屏容器适配高密度屏，密码和短信码不写入网页或日志。
+- 位置签到使用服务端返回的签到中心坐标，用户确认后提交、查询 signed 状态；无需手机定位权限，具有轮次隔离和防重复提交保护。
 
 ### 2. 查看课堂动态
 
@@ -26,14 +28,24 @@ Android 8.0+ 原生直连客户端，版本 **3.0（versionCode 26）**。
 - **在手机生成图片版 PPTX 和图片 ZIP**，支持保存进度和取消，课件直接带走。
 - 自定义 User-Agent，设备默认值读取实际 Android 版本、型号与 Build 编号。
 
+## 3.2 更新与功能整合
+
+已根据功能记录重建密码 / 短信登录、腾讯验证显示与服务端位置签到，不依赖旧 29 版源码；详见[功能重建说明](docs/integration-status.md)。
+
+- [二维码与诊断日志](docs/qr-login-3.2.md)
+- [账号密码、短信与官方验证](docs/account-login.md)
+- [服务端位置签到](docs/location-checkin.md)
+- [更新检测和配置](docs/update-check.md)
+
 ## 其他说明
 
-- 此版本**没有应用更新检测或强制更新功能**，不会请求有道笔记，也不会因更新信息获取失败跳转项目页面或退出。项目主页仅可由用户在“我的 → 关于应用”主动打开。课程和动态的刷新功能保留。
-- 手机直接连接雨课堂 HTTP / WebSocket，**无中继服务器、无 WebView、无演示账号**。
+- **GitHub 版同样启用有道云更新检测**，每次启动 / 返回前台静默检查，与自动登录和课程加载并行，无检测等待弹窗，保留强制更新规则。获取或解析配置失败时打开项目主页并退出，详见[更新说明](docs/update-check.md)。
+- 二维码失效立即撤下旧图，自动重新获取并退避重试；扫码授权后资料查询失败单独恢复，详见[二维码与日志](docs/qr-login-3.2.md)。
+- 手机直接连接雨课堂 HTTP / WebSocket，**无中继服务器、无演示账号**。仅腾讯官方安全验证使用隔离 WebView，课堂 / 动态页面和登录提交保持原生。
 
 ## 包名说明
 
-本公开源码的 applicationId / namespace 为 **`com.ykt.assistant`**，与作者自有签名版本包名不同，会作为独立应用安装，需要重新登录，旧包名数据不会自动迁移。
+GitHub 默认 applicationId / namespace 为 **`com.ykt.assistant`**。私有构建可传 `-PassistantApplicationId=starx.ykt.assistant` 保留原私有版安装包 ID；namespace 保持 com.ykt.assistant。覆盖安装必须同时保持原包名与相同签名。不同包名作为独立应用安装，数据不会自动迁移。
 
 ## Release 说明
 
@@ -67,13 +79,13 @@ cd android
 
 产物：`android/app/build/outputs/apk/debug/app-debug.apk`。本机 SDK 可通过 `ANDROID_HOME` 或未纳入源码的 `android/local.properties` 配置。
 
-`release` 默认不签名，需自行配置正式签名。已移除所有原签名密钥及密码；应用版本名和版本号保留为 3.0 / 26。
+`release` 默认不签名，需在构建后使用自己的签名文件签名；不会将私钥或密码写入 Gradle / GitHub 配置。私有包名构建命令：`gradle -PassistantApplicationId=starx.ykt.assistant :app:assembleRelease`。已移除所有原签名密钥及密码；应用版本名和版本号为 3.2 / 31。
 
 ## 数据与隐私
 
-- Cookie 和课堂凭证通过 Android Keystore 加密保存，本地缓存优先位于 `Android/data/com.ykt.assistant/files/`，不记录本地日志。
+- Cookie 和课堂凭证通过 Android Keystore 加密保存，本地缓存优先位于 `Android/data/com.ykt.assistant/files/`；新增按日期保存的脱敏诊断日志，可在“我的”中主动导出。
 - 测试使用模拟接口与脱敏数据，不使用真实账号 Cookie；真机登录、Keystore 和课堂权限仍需在实际设备验证。
-- 本次验证：115 项单元 / 界面流程测试通过，Android Lint 无问题；APK 包名与标准调试签名已核验。
+- 本次完整重建版本通过 168 项测试及 Debug / Release Lint，Debug 与未签名 Release 均可构建。测试使用模拟接口，不代表已完成真实微信授权、短信下发或课堂签到验证。
 
 ## 文档
 

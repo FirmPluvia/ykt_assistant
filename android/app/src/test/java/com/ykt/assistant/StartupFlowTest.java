@@ -29,6 +29,7 @@ import static org.junit.Assert.*;
 public class StartupFlowTest {
     private static HttpUrl endpoint;
     public static class TestActivity extends MainActivity {
+        @Override protected void checkForUpdates(boolean manual) {}
         @Override protected RainApi createStartupApi() throws Exception {
             RainApiTest.Store store=new RainApiTest.Store(); store.data="[{\"raw\":\"sessionid=fixture; Path=/\"}]"; return new RainApi(endpoint,store);
         }
@@ -55,7 +56,7 @@ public class StartupFlowTest {
             if(r.getPath().equals("/api/v3/classroom/on-lesson")) return new MockResponse().setBody("{\"data\":{\"onLessonClassrooms\":[]}}");
             return new MockResponse().setResponseCode(404);
         } });
-        start(); settle(); assertNotNull(get("user")); assertNotNull(get("catalog")); assertNotNull(find(activity.getWindow().getDecorView(),"测试数学课")); assertNull(ShadowDialog.getLatestDialog()); assertEquals("com.ykt.assistant",activity.getPackageName());
+        start(); settle(); assertNotNull(get("user")); assertNotNull(get("catalog")); assertNotNull(find(activity.getWindow().getDecorView(),"测试数学课")); assertNull(ShadowDialog.getLatestDialog()); assertEquals(BuildConfig.APPLICATION_ID,activity.getPackageName());
         assertEquals(java.util.Arrays.asList("/v/course_meta/user_info","/v/course_meta/learning_list/","/api/v3/classroom/on-lesson"),new ArrayList<>(paths));
         controller.pause().stop().start().resume().visible(); ShadowLooper.idleMainLooper(); assertEquals(3,server.getRequestCount()); assertFalse(activity.isFinishing()); assertNull(Shadows.shadowOf(activity).getNextStartedActivity());
     }

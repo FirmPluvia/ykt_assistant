@@ -37,6 +37,7 @@ import static org.junit.Assert.*;
 @LooperMode(LooperMode.Mode.PAUSED)
 public class LoginFlowTest {
     public static class LoginActivity extends MainActivity {
+        @Override protected void checkForUpdates(boolean manual) {}
         
         static MockWebServer[] servers;
         static List<RainApi> clients;
@@ -94,7 +95,7 @@ public class LoginFlowTest {
         release=new CountDownLatch(1); open(); waitFor(() -> firstQr.get()==1); RainApi old=LoginActivity.clients.get(0);
         click(panel(),"雨课堂"); Dialog picker=ShadowDialog.getLatestDialog(); click(picker.getWindow().getDecorView(),"荷塘雨课堂"); waitFor(this::ready);
         assertTrue(old.isClosed()); assertEquals(1,secondQr.get()); assertEquals(Integer.valueOf(1),LoginActivity.selected.get(1)); assertNotNull(find(panel(),"荷塘雨课堂")); release.countDown();
-        waitFor(() -> { try { return ((Integer)get("busyCount"))==1; } catch(Exception e) { return false; } }); assertNull(get("user")); assertSame(LoginActivity.clients.get(1),get("api"));
+        waitFor(() -> { try { return ((Integer)get("busyCount"))==0; } catch(Exception e) { return false; } }); assertNull(get("user")); assertSame(LoginActivity.clients.get(1),get("api"));
     }
     @Test public void dismissingLoginBeforeQrCompletesCannotRestoreLogin() throws Exception {
         release=new CountDownLatch(1); open(); waitFor(() -> firstQr.get()==1); Dialog login=(Dialog)get("loginDialog"); RainApi old=LoginActivity.clients.get(0); login.dismiss(); release.countDown();
@@ -104,4 +105,8 @@ public class LoginFlowTest {
         first.setDispatcher(dispatcher(firstQr,true)); open(); waitFor(() -> { try { return get("user")!=null; } catch(Exception e) { return false; } });
         assertNull(get("loginDialog")); assertFalse(LoginActivity.clients.get(0).isClosed()); assertSame(LoginActivity.clients.get(0),get("api")); assertFalse(activity.getSharedPreferences("native_session",0).getBoolean("signed_out",true));
     }
+    @Test public void qrCanSwitchToPasswordAndBackWithoutOldClientSurviving() throws Exception {
+        open(); waitFor(this::ready); RainApi original=LoginActivity.clients.get(0); click(panel(),"账号密码登录"); waitFor(()->LoginActivity.clients.size()==2); assertTrue(original.isClosed()); assertNotNull(find(panel(),"登录雨课堂")); click(panel(),"使用二维码登录"); waitFor(this::ready); assertTrue(LoginActivity.clients.size()>=3); assertTrue(LoginActivity.clients.get(1).isClosed()); assertNotNull(find(panel(),"刷新二维码"));
+    }
+
 }

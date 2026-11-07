@@ -56,10 +56,11 @@ public class RainApiTest {
             s.enqueue(new MockResponse().setResponseCode(302).setHeader("Location","https://example.com/")); try { api.profile(); fail(); } catch(RainApi.Failure e) { assertEquals(302,e.code); } api.close();
         }
     }
-    @Test public void locationUsesActualInputThenQueriesConfirmation() throws Exception {
-        try(MockWebServer s=new MockWebServer()) { s.start(); RainApi api=new RainApi(s.url("/"),new Store()); join(s); api.checkin("lesson"); s.takeRequest();
-            s.enqueue(response("{\"needLocationSignIn\":true,\"signed\":false}")); s.enqueue(response("{\"code\":0}")); s.enqueue(response("{\"signed\":true}")); assertTrue(api.submitLocation(31.234,121.456).getBoolean("signed"));
-            assertEquals("/api/v3/lesson/location-checkin/eligibility",s.takeRequest().getPath()); RecordedRequest submit=s.takeRequest(); JSONObject b=new JSONObject(submit.getBody().readUtf8()); assertEquals("/api/v3/lesson/location-checkin/submit",submit.getPath()); assertEquals(31.234,b.getDouble("lat"),0); assertEquals("lesson",b.getString("lessonId")); assertEquals(54,b.getInt("source")); assertEquals("/api/v3/lesson/location-checkin/eligibility",s.takeRequest().getPath()); api.close();
+    @Test public void locationUsesServerTargetThenQueriesConfirmation() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { server.start(); RainApi api=new RainApi(server.url("/"),new Store()); join(server); api.checkin("lesson"); server.takeRequest();
+            String state="{\"needLocationSignIn\":true,\"signed\":false,\"session\":{\"centerLat\":31.234,\"centerLng\":121.456}}";
+            server.enqueue(response(state)); LocationCheckin info=api.locationInfo(); server.takeRequest(); server.enqueue(response(state)); server.enqueue(response("{\"code\":0}")); server.enqueue(response("{\"signed\":true}")); assertTrue(api.submitServerLocation(info).signed);
+            assertEquals("GET",server.takeRequest().getMethod()); RecordedRequest post=server.takeRequest(); JSONObject body=new JSONObject(post.getBody().readUtf8()); assertEquals("/api/v3/lesson/location-checkin/submit",post.getPath()); assertEquals(31.234,body.getDouble("lat"),0); assertEquals("lesson",body.getString("lessonId")); assertEquals(54,body.getInt("source")); assertEquals("GET",server.takeRequest().getMethod()); api.close();
         }
     }
     @Test public void directWebSocketUsesLessonTokenAndDiscoversPresentation() throws Exception {

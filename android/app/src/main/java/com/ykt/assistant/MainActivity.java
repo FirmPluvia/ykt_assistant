@@ -1,12 +1,9 @@
 package com.ykt.assistant;
 
-import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -15,9 +12,6 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.content.res.ColorStateList;
-import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -48,13 +42,15 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final int GREEN=0xff2c5846,INK=0xff263d32,MUTED=0xff7e8d81,BG=0xfff7f9f5,LINE=0xffe3e9df,PALE=0xffedf3e9,WHITE=0xffffffff;
     private static final String PROJECT_URL="https://github.com/FirmPluvia/ykt_assistant";
-    private static final int SAVE=42,LOCATION=43,SAVE_IMAGE=44;
+    private static final int SAVE=42,SAVE_IMAGE=44,EXPORT_LOGS=45;
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final ExecutorService workers=Executors.newFixedThreadPool(4);
     private final LruCache<String,Bitmap> bitmaps=new LruCache<String,Bitmap>(16*1024*1024) {
         @Override protected int sizeOf(String key,Bitmap value) { return value.getAllocationByteCount(); }
     };
     private RainApi api;
+    private QrLoginController qrController;
+    private DiagnosticLog diagnostics;
     private SessionVault vault;
     private LessonCache lessonCache;
     private SharedPreferences prefs;
@@ -72,16 +68,13 @@ public class MainActivity extends Activity {
     private String currentCourse="",connection="等待课堂连接",pendingFormat;
     private JSONObject exportPresentation;
     private Runnable cancelEntryLookup;
-    private boolean checkingCredentials,onlyLive,fetchingPpt,joining,downloading,locating,loadingCourses,locationSubmitting;
+    private boolean checkingCredentials,onlyLive,fetchingPpt,joining,downloading,loadingCourses,locationSubmitting;
     private int tab,page,imageEpoch,loginEpoch,busyCount,lessonEpoch,entryRevision,pendingExportEpoch;
     private volatile int accountEpoch;
     private RainApi pendingExportApi;
     private final List<Dialog> dialogs=new ArrayList<>();
-    private Dialog loginDialog,fullDialog;
+    private Dialog loginDialog,fullDialog,humanVerificationDialog;
     private ZoomImageView fullImage;
-    private LocationManager locationManager;
-    private LocationListener locationListener;
-    private Runnable locationTimeout;
     interface Task<T> { T get() throws Exception; }
     interface Done<T> { void accept(T value) throws Exception; }
     interface Fail { void accept(Exception error); }
@@ -123,7 +116,7 @@ public class MainActivity extends Activity {
     private void section(String title,String right,Runnable action) { LinearLayout r=row(); r.addView(text(title,18,INK,true),new LinearLayout.LayoutParams(0,-2,1)); if(right!=null) { TextView t=text(right,12,GREEN,true); t.setGravity(Gravity.CENTER); t.setPadding(dp(14),dp(12),0,dp(12)); t.setMinHeight(dp(44)); t.setOnClickListener(v -> action.run()); r.addView(t); } body.addView(r,lp(-1,-2)); gap(body,12); }
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState); prefs=getSharedPreferences("native_preferences",MODE_PRIVATE); vault=new SessionVault(this);
-        lessonCache=new LessonCache(this); activityStore=new FeedStore(this); migrateLegacyLogs();
+        lessonCache=new LessonCache(this); activityStore=new FeedStore(this); diagnostics=new DiagnosticLog(this); diagnostics.event("APP","startup","OPEN",0,0,0);
         // The v1 WebView relay configuration is intentionally neither read nor used.
         getSharedPreferences("assistant",MODE_PRIVATE).edit().clear().apply();
         root=column(); root.setBackgroundColor(BG);
@@ -246,7 +239,7 @@ public class MainActivity extends Activity {
     private void confirmCheckin(CourseCatalog.Entry entry) {
         if(user==null||api==null||api.isClosed()) { openLogin(); return; }
         if(checkingCredentials) { toast("正在读取课堂凭证，请稍候"); return; }
-        if(joining||locationSubmitting||locating) { toast("请先完成当前课堂操作"); return; }
+        if(joining||locationSubmitting||checkingLocation) { toast("请先完成当前课堂操作"); return; }
         if(downloading||pendingFormat!=null) { toast("请先完成课件保存，再切换课堂"); return; }
         if(entry.live==null||entry.live.optString("lessonId","").isEmpty()) { toast("当前课程没有正在进行的课堂"); return; }
         final RainApi owner=api; final String id=entry.live.optString("lessonId"); final int revision=++entryRevision,account=accountEpoch;
@@ -294,7 +287,7 @@ public class MainActivity extends Activity {
     }
     private void showLiveClass(CourseCatalog.Entry entry,boolean fresh) {
         currentCourse=entry.course.optString("course_name","当前课堂");
-        if(fresh) { lessonEpoch++; fetchingPpt=false; presentation=null; page=0; bitmaps.evictAll(); connection="正在连接课堂…"; }
+        if(fresh) { cancelLocationFlow(); lessonEpoch++; fetchingPpt=false; presentation=null; page=0; bitmaps.evictAll(); connection="正在连接课堂…"; }
         tab=1; dynamicView=LIVE_READER; render(); if(fresh) connectClass();
     }
     private static final int FEED=0,DETAIL=1,LIVE_READER=2,HISTORY_READER=3;
@@ -617,7 +610,8 @@ public class MainActivity extends Activity {
             String id=e.optString("presentationId");
             if(!id.isEmpty()&&(presentation==null||!id.equals(presentation.optString("id"))||op.equals("showpresentation"))) fetchPresentation(false);
             else if(presentation!=null&&e.has("slide")&&prefs.getBoolean("follow",true)&&tab==1&&dynamicView==LIVE_READER) showPage(e.optInt("slide",1)-1,false);
-            if(op.equals("locationcheckinext")) toast("老师已开启位置签到，可在课堂签到卡片查看");
+            if(op.equals("locationcheckinext")) { cancelLocationFlow(); toast("老师已开启位置签到，可在课堂签到卡片确认签到"); }
+            if(op.equals("locationcheckinend")||e.optBoolean("finished")) { cancelLocationFlow(); if(op.equals("locationcheckinend")) toast("本轮位置签到已结束"); }
         })); } catch(Exception e) { toast(error(e)); }
     }
     private void fetchPresentation(boolean notify) {
@@ -659,7 +653,8 @@ public class MainActivity extends Activity {
         section("连接方式",null,null); LinearLayout local=card(); local.addView(text("手机直连官方服务",17,INK,true)); gap(local,10); local.addView(text("HTTP 与课堂 WebSocket 均从手机发出。无需配置服务器，不启动本地 HTTP 服务，不经过开发者中继。",13,MUTED,false)); gap(local,16); local.addView(pill(RainApi.SERVICES[prefs.getInt("service",0)],GREEN,PALE)); addCard(local);
         section("请求设置",null,null); LinearLayout ua=compactCard(),uaTop=row(); uaTop.addView(text("User-Agent",15,INK,true),new LinearLayout.LayoutParams(0,-2,1)); uaTop.addView(pill(UserAgent.isCustom(prefs)?"自定义":"设备默认",GREEN,PALE)); ua.addView(uaTop); gap(ua,10); TextView preview=text(UserAgent.current(prefs),11,MUTED,false); preview.setMaxLines(3); preview.setEllipsize(android.text.TextUtils.TruncateAt.END); ua.addView(preview); gap(ua,14); ua.addView(button("修改 User-Agent",false,this::userAgentSettings)); addCard(ua);
         section("关于应用",null,null); LinearLayout about=compactCard(); about.addView(text("作者 FirmPluvia",14,INK,true)); gap(about,12); about.addView(button("项目主页",false,() -> openWeb(PROJECT_URL))); addCard(about);
-        section("使用小提示",null,null); LinearLayout guide=card(); guideRow(guide,"01","连接账号","选择与你的账号一致的雨课堂版本，获取官方二维码，扫码授权后即可连接。"); guideRow(guide,"02","确认签到","点击课程优先使用本地凭证；未找到时确认签到入课，位置签到单独查询。"); guideRow(guide,"03","保存课件","支持本机生成图片版 PPTX 和图片 ZIP。"); addCard(guide);
+        section("诊断日志",null,null); LinearLayout log=compactCard(); log.addView(text("记录登录阶段、耗时与错误码，不记录密码、验证码、token 或 Cookie。",12,MUTED,false)); gap(log,12); log.addView(button("导出今日日志",false,this::exportDiagnostics)); addCard(log);
+        section("使用小提示",null,null); LinearLayout guide=card(); guideRow(guide,"01","连接账号","选择雨课堂版本，支持二维码、手机号 / 邮箱密码，以及短信验证码登录。"); guideRow(guide,"02","确认签到","点击课程优先使用本地凭证；未找到时确认签到入课，位置签到单独查询。"); guideRow(guide,"03","保存课件","支持本机生成图片版 PPTX 和图片 ZIP。"); addCard(guide);
         gap(body,8); TextView foot=text("雨课堂助手 "+BuildConfig.VERSION_NAME,10,MUTED,false); foot.setGravity(Gravity.CENTER); body.addView(foot);
     }
     private void userAgentSettings() {
@@ -691,12 +686,12 @@ public class MainActivity extends Activity {
         fetchingPpt=false; joining=false; loadingCourses=false; locationSubmitting=false; downloading=false; onlyLive=false; page=0; tab=0;
         if(imageJob!=null) imageJob.cancel(); imageJob=null; pendingImage=null;
         pendingFormat=null; exportPresentation=null; pendingExportApi=null; bitmaps.evictAll();
-        stopLocation();
+        cancelLocationFlow();
         for(Dialog dialog:new ArrayList<>(dialogs)) if(dialog.isShowing()) dialog.dismiss(); dialogs.clear();
         if(fullDialog!=null) fullDialog.dismiss(); fullImage=null; slideImage=null; follow=null; thumbStrip=null; connectionLabel=null;
         retire(previous);
         try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception e) { toast("已退出，请重新打开登录窗口"); }
-        render(); showLoading(); toast("已退出登录");
+        render(); showLoading(); toast("已退出登录"); showPendingUpdate();
     }
     private boolean startupSessionRestored;
     private void restoreStartupSession() {
@@ -707,6 +702,50 @@ public class MainActivity extends Activity {
     private void openWeb(String url) {
         if(url==null||url.isEmpty()) { toast("链接暂未配置"); return; }
         try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)); } catch(Exception e) { toast("无法打开链接，请安装浏览器后重试"); }
+    }
+
+    private UpdateChecker updateChecker;
+    private UpdateInfo pendingUpdate;
+    private Dialog updateDialog;
+    private boolean checkingUpdate,exitingForUpdate;
+    private final ExecutorService updateIo=Executors.newSingleThreadExecutor();
+    private final java.util.Set<Integer> dismissedUpdates=new java.util.HashSet<>();
+    protected UpdateChecker createUpdateChecker() { return new UpdateChecker(); }
+    protected void checkForUpdates(boolean manual) {
+        if(checkingUpdate||exitingForUpdate||isDestroyed()||isFinishing()) return;
+        checkingUpdate=true; if(updateChecker==null) updateChecker=createUpdateChecker(); String ua=UserAgent.current(prefs); UpdateChecker checker=updateChecker;
+        updateIo.execute(() -> {
+            UpdateInfo value=null; Exception failure=null; try { value=checker.fetch(ua,diagnostics); } catch(Exception e) { failure=e; }
+            UpdateInfo info=value; Exception problem=failure;
+            ui.post(() -> {
+                if(isDestroyed()||isFinishing()||exitingForUpdate) return; checkingUpdate=false;
+                if(problem!=null) { exitAfterUpdateFailure(); return; }
+                if(updateDialog!=null) { updateDialog.dismiss(); updateDialog=null; }
+                pendingUpdate=info.newer(BuildConfig.VERSION_CODE)?info:null;
+                if(manual) dismissedUpdates.remove(info.versionCode); showPendingUpdate();
+            });
+        });
+    }
+    private void exitAfterUpdateFailure() {
+        if(exitingForUpdate||isFinishing()) return; exitingForUpdate=true; accountEpoch++; loginEpoch++; if(qrController!=null) qrController.close(); if(api!=null) api.cancel();
+        diagnostics.event("UPDATE","startup","EXIT_TO_PROJECT",0,0,0); toast("无法获取更新信息，将打开项目主页并退出应用");
+        try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(UpdateInfo.PROJECT_URL)).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); } catch(Exception e) { toast("无法打开项目主页，应用即将退出"); } finally { finishAndRemoveTask(); }
+    }
+    private void showPendingUpdate() {
+        if(pendingUpdate==null||isDestroyed()||isFinishing()||(updateDialog!=null&&updateDialog.isShowing())) return;
+        UpdateInfo info=pendingUpdate; boolean required=info.required(BuildConfig.VERSION_CODE); if(!required&&dismissedUpdates.contains(info.versionCode)) return;
+        Sheet sheet=createSheet(required?"需要更新后继续使用":info.title,"新版本 "+info.versionName+" · 当前 "+BuildConfig.VERSION_NAME); updateDialog=sheet.dialog;
+        if(!info.description.isEmpty()) { sheet.panel.addView(text(info.description,13,INK,false)); gap(sheet.panel,18); }
+        Button disk=button("网盘更新",true,() -> openWeb(info.downloadUrl)); disk.setEnabled(!info.downloadUrl.isEmpty()); sheet.panel.addView(disk); gap(sheet.panel,10);
+        Button github=button("GitHub 更新",false,() -> openWeb(info.githubUrl)); github.setEnabled(!info.githubUrl.isEmpty()); sheet.panel.addView(github); gap(sheet.panel,10);
+        if(info.downloadUrl.isEmpty()&&info.githubUrl.isEmpty()) { sheet.panel.addView(text("更新链接暂未配置，请稍后重新检查。",12,MUTED,false)); gap(sheet.panel,10); }
+        sheet.panel.addView(button("重新检查",false,() -> checkForUpdates(true))); gap(sheet.panel,10);
+        sheet.panel.addView(button(required?"退出应用":"稍后再说",false,() -> { if(required) finishAndRemoveTask(); else { dismissedUpdates.add(info.versionCode); sheet.dialog.dismiss(); } }));
+        sheet.dialog.setCancelable(!required); sheet.dialog.setCanceledOnTouchOutside(!required); sheet.dialog.setOnCancelListener(d -> dismissedUpdates.add(info.versionCode)); sheet.dialog.setOnDismissListener(d -> { if(updateDialog==sheet.dialog) updateDialog=null; }); showSheet(sheet); dialogs.remove(sheet.dialog);
+    }
+    private void exportDiagnostics() {
+        Intent save=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("text/plain").putExtra(Intent.EXTRA_TITLE,"ykt-assistant-"+new java.text.SimpleDateFormat("yyyy-MM-dd",java.util.Locale.ROOT).format(new java.util.Date())+".log");
+        try { startActivityForResult(save,EXPORT_LOGS); } catch(Exception e) { toast("未找到系统文件保存程序"); }
     }
 
     private static final class Sheet {
@@ -754,102 +793,171 @@ public class MainActivity extends Activity {
         if(user!=null) { toast("请先退出当前账号"); return; }
         if(loginDialog!=null&&loginDialog.isShowing()) return;
         final Dialog dialog=new Dialog(this); loginDialog=dialog;
-        ScrollView scroll=new ScrollView(this); scroll.setFillViewport(false);
-        LinearLayout form=column(); form.setPadding(dp(24),dp(28),dp(24),dp(18)); form.setBackground(bg(BG,26,0)); scroll.addView(form); dialog.setContentView(scroll);
-        form.addView(lineLabel("WELCOME TO YOUR CLASSROOM")); gap(form,12); form.addView(text("扫码连接课堂",25,INK,true)); gap(form,10); form.addView(text("使用官方扫码入口授权，登录会话保存在本机。",12,MUTED,false)); gap(form,24);
+        ScrollView scroll=new ScrollView(this); LinearLayout form=column(); form.setPadding(dp(24),dp(28),dp(24),dp(18)); form.setBackground(bg(BG,26,0)); scroll.addView(form); dialog.setContentView(scroll);
+        form.addView(lineLabel("WELCOME TO YOUR CLASSROOM")); gap(form,12); form.addView(text("扫码连接课堂",25,INK,true)); gap(form,10); form.addView(text("二维码失效后会自动重新获取；请扫描当前显示的新码。",12,MUTED,false)); gap(form,20);
+        LinearLayout alternatives=row(); Button password=button("账号密码登录",false,() -> { dialog.dismiss(); openAccountLogin(false); }),sms=button("验证码登录",false,() -> { dialog.dismiss(); openAccountLogin(true); }); LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,dp(44),1); left.rightMargin=dp(5); alternatives.addView(password,left); alternatives.addView(sms,new LinearLayout.LayoutParams(0,dp(44),1)); form.addView(alternatives); gap(form,18);
         final int[] service={prefs.getInt("service",0)};
         form.addView(text("雨课堂版本",12,MUTED,true)); gap(form,9);
-        LinearLayout serviceRow=row(); serviceRow.setPadding(dp(14),dp(10),dp(14),dp(10)); serviceRow.setFocusable(true); serviceRow.setBackground(new RippleDrawable(ColorStateList.valueOf(0x142c5846),bg(WHITE,15,LINE),bg(WHITE,15,0)));
-        FrameLayout serviceIcon=new FrameLayout(this); serviceIcon.setBackground(bg(PALE,11,0)); serviceIcon.addView(new Icon(this,0,GREEN),new FrameLayout.LayoutParams(dp(21),dp(21),Gravity.CENTER)); serviceRow.addView(serviceIcon,lp(38,38));
-        LinearLayout names=column(); names.setPadding(dp(12),0,0,0); TextView serviceName=text(RainApi.SERVICES[service[0]],14,INK,true); names.addView(serviceName); gap(names,6); names.addView(text("点击切换版本",10,MUTED,false)); serviceRow.addView(names,new LinearLayout.LayoutParams(0,-2,1)); serviceRow.setMinimumHeight(dp(66)); form.addView(serviceRow,lp(-1,-2)); gap(form,20);
+        Button servicePicker=button(RainApi.SERVICES[service[0]],false,() -> {}); servicePicker.setContentDescription("雨课堂版本："+RainApi.SERVICES[service[0]]+"，点击切换"); form.addView(servicePicker); gap(form,18);
         FrameLayout qrFrame=new FrameLayout(this); qrFrame.setBackground(bg(WHITE,18,LINE));
-        TextView placeholder=text("正在获取登录二维码…",13,MUTED,false); placeholder.setGravity(Gravity.CENTER); qrFrame.addView(placeholder,new FrameLayout.LayoutParams(-1,-1));
         ImageView qrImage=new ImageView(this); qrImage.setScaleType(ImageView.ScaleType.FIT_CENTER); qrImage.setPadding(dp(16),dp(16),dp(16),dp(16)); qrImage.setContentDescription("雨课堂官方登录二维码"); qrFrame.addView(qrImage,new FrameLayout.LayoutParams(-1,-1));
-        form.addView(qrFrame,lp(-1,224)); gap(form,14);
+        TextView placeholder=text("正在获取新的登录二维码…",13,MUTED,false); placeholder.setGravity(Gravity.CENTER); placeholder.setPadding(dp(18),0,dp(18),0); qrFrame.addView(placeholder,new FrameLayout.LayoutParams(-1,-1)); form.addView(qrFrame,lp(-1,224)); gap(form,14);
         TextView hint=text("正在连接官方登录服务…",12,MUTED,false); hint.setGravity(Gravity.CENTER); form.addView(hint); gap(form,18);
-        TextView loginError=text("",12,0xffa35445,false); loginError.setTextIsSelectable(true);
-        Button qrButton=button("刷新二维码",true,() -> {}); form.addView(qrButton); gap(form,10); form.addView(loginError); gap(form,6);
-        Button close=button("稍后再说",false,dialog::dismiss); close.setBackground(bg(BG,12,0)); close.setTextColor(MUTED); form.addView(close);
-        accountEpoch++; busyCount=0; showLoading();
-        class LoginFlow {
-            RainApi attempt=api; Dialog picker,confirmation;
-            boolean active(int run,RainApi client) { return dialog.isShowing()&&loginDialog==dialog&&run==loginEpoch&&attempt==client&&user==null; }
-            void start() {
-                if(!dialog.isShowing()||user!=null) return;
-                final int run=++loginEpoch; vault.clear(); retire(attempt); attempt=null;
-                qrButton.setEnabled(false); qrButton.setText("正在获取二维码…"); loginError.setText(""); qrImage.setImageDrawable(null); placeholder.setText("正在获取登录二维码…"); placeholder.setVisibility(View.VISIBLE); hint.setText("正在连接官方登录服务…");
-                try { prefs.edit().putInt("service",service[0]).apply(); attempt=configureApi(createLoginClient(service[0],vault.session())); api=attempt; }
-                catch(Exception e) { loginError.setText(error(e)); hint.setText("获取失败，可刷新或切换雨课堂版本"); qrButton.setText("刷新二维码"); qrButton.setEnabled(true); return; }
-                final RainApi client=attempt;
-                work(() -> { JSONObject q=client.qr(); return new Object[]{q,LoginQr.image(client,q)}; },result -> {
-                    if(!active(run,client)) return;
-                    JSONObject q=(JSONObject)result[0]; qrImage.setImageBitmap((Bitmap)result[1]); placeholder.setVisibility(View.GONE); hint.setText("请使用微信或官方雨课堂扫码授权"); qrButton.setText("刷新二维码"); qrButton.setEnabled(true);
-                    work(() -> client.pollQr(q.getString("token")),profile -> {
-                        if(!active(run,client)) return;
-                        if(picker!=null) picker.dismiss(); if(confirmation!=null) confirmation.dismiss(); loginSuccess(profile,client);
-                    },e -> { if(active(run,client)) { loginError.setText(error(e)); hint.setText("扫码未完成，可刷新二维码重试"); qrButton.setText("刷新二维码"); qrButton.setEnabled(true); } });
-                },e -> { if(active(run,client)) { loginError.setText(error(e)); placeholder.setText("二维码获取失败"); hint.setText("可刷新重试，或切换雨课堂版本"); qrButton.setText("刷新二维码"); qrButton.setEnabled(true); } });
+        Button qrButton=button("正在获取二维码…",true,() -> {}); qrButton.setEnabled(false); form.addView(qrButton); gap(form,10); form.addView(button("稍后再说",false,dialog::dismiss));
+        accountEpoch++; busyCount=0; showLoading(); retire(api);
+        final QrLoginController.State[] state={QrLoginController.State.FETCHING}; final Dialog[] picker={null},confirmation={null};
+        QrLoginController controller=new QrLoginController((selected,round) -> {
+            vault.clear(); prefs.edit().putInt("service",selected).apply(); RainApi client=configureApi(createLoginClient(selected,vault.session())); client.setDiagnostics(diagnostics,round); return client;
+        },new QrLoginController.Listener() {
+            @Override public void state(QrLoginController.State next,Bitmap image,String message,RainApi owner) {
+                if(loginDialog!=dialog||!dialog.isShowing()||user!=null) return; state[0]=next; if(owner!=null) api=owner;
+                boolean ready=next==QrLoginController.State.READY; qrImage.setImageBitmap(ready?image:null); qrImage.setVisibility(ready?View.VISIBLE:View.INVISIBLE); placeholder.setVisibility(ready?View.GONE:View.VISIBLE); placeholder.setText(next==QrLoginController.State.FETCHING?"正在获取新二维码…":next==QrLoginController.State.AUTHORIZED||next==QrLoginController.State.PROFILE_RETRY||next==QrLoginController.State.PROFILE_FAILED?"扫码已授权":next==QrLoginController.State.FAILED?"暂无可用二维码":"二维码已失效"); hint.setText(message);
+                boolean profileFailed=next==QrLoginController.State.PROFILE_FAILED; qrButton.setText(profileFailed?"重试获取账号信息":next==QrLoginController.State.FETCHING?"正在获取二维码…":"刷新二维码"); qrButton.setEnabled(next==QrLoginController.State.READY||next==QrLoginController.State.FAILED||next==QrLoginController.State.EXPIRED||next==QrLoginController.State.BACKOFF||profileFailed);
             }
-            void confirmRefresh() {
-                if(confirmation!=null&&confirmation.isShowing()) return;
-                Sheet sheet=createSheet("刷新登录二维码？","刷新后将停止等待当前二维码，请使用新二维码重新扫码。"); confirmation=sheet.dialog;
-                sheet.panel.addView(button("确认刷新",true,() -> { sheet.dialog.dismiss(); start(); })); gap(sheet.panel,10); sheet.panel.addView(button("继续扫码",false,sheet.dialog::dismiss)); showSheet(sheet);
+            @Override public void signedIn(RainApi owner,JSONObject profile) {
+                if(loginDialog!=dialog||!dialog.isShowing()||user!=null) { owner.cancel(); return; }
+                if(picker[0]!=null) picker[0].dismiss(); if(confirmation[0]!=null) confirmation[0].dismiss(); loginSuccess(profile,owner);
+            }
+        },diagnostics);
+        qrController=controller;
+        qrButton.setOnClickListener(v -> {
+            if(state[0]==QrLoginController.State.PROFILE_FAILED) { controller.retryProfile(); return; }
+            if(confirmation[0]!=null&&confirmation[0].isShowing()) return;
+            Sheet sheet=createSheet("刷新登录二维码？","确认后将停用当前二维码，获取新码并重新等待扫码。"); confirmation[0]=sheet.dialog;
+            sheet.panel.addView(button("确认刷新",true,() -> { sheet.dialog.dismiss(); controller.start(service[0]); })); gap(sheet.panel,10); sheet.panel.addView(button("继续扫码",false,sheet.dialog::dismiss)); showSheet(sheet);
+        });
+        servicePicker.setOnClickListener(v -> {
+            if(picker[0]!=null&&picker[0].isShowing()) return;
+            picker[0]=chooseService(service[0],index -> { if(loginDialog!=dialog||!dialog.isShowing()||user!=null||index==service[0]) return; service[0]=index; servicePicker.setText(RainApi.SERVICES[index]); servicePicker.setContentDescription("雨课堂版本："+RainApi.SERVICES[index]+"，点击切换"); controller.start(index); });
+        });
+        dialog.setOnDismissListener(d -> {
+            controller.close(); if(qrController==controller) qrController=null; if(picker[0]!=null) picker[0].dismiss(); if(confirmation[0]!=null) confirmation[0].dismiss();
+            if(loginDialog!=dialog) return; loginDialog=null; loginEpoch++;
+            if(user==null) { vault.clear(); if(!isDestroyed()&&!isFinishing()) try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception ignored) {} }
+        });
+        dialog.show(); if(dialog.getWindow()!=null) { dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent); dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(32),dp(460)),-2); dialog.getWindow().setDimAmount(.32f); }
+        controller.start(service[0]);
+    }
+    protected Dialog showHumanVerification(RainApi client,HumanVerification.Callback callback) {
+        if(humanVerificationDialog!=null) humanVerificationDialog.dismiss(); long started=System.nanoTime(); client.trace("HUMAN","REQUEST",0,0,0);
+        humanVerificationDialog=HumanVerification.show(this,client.host(),UserAgent.current(prefs),new HumanVerification.Callback() {
+            @Override public void verified(HumanVerification.Proof proof) { client.trace("HUMAN","ACCEPTED",0,0,(System.nanoTime()-started)/1000000); callback.verified(proof); }
+            @Override public void cancelled(String reason) { client.trace("HUMAN",reason!=null&&reason.startsWith("已取消")?"CANCELLED":"FAILED",0,0,(System.nanoTime()-started)/1000000); callback.cancelled(reason); }
+        }); return humanVerificationDialog;
+    }
+    private android.widget.EditText loginField(String hint,boolean secret) {
+        android.widget.EditText input=new android.widget.EditText(this); input.setHint(hint); input.setContentDescription(hint); input.setTextSize(14); input.setTextColor(INK); input.setHintTextColor(MUTED); input.setSingleLine(true); input.setPadding(dp(14),dp(12),dp(14),dp(12)); input.setBackground(bg(WHITE,12,LINE)); input.setSaveEnabled(false); input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS); input.setInputType(secret?android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD:android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS); return input;
+    }
+    private void openAccountLogin(boolean smsFirst) {
+        if(user!=null||downloading||joining||(loginDialog!=null&&loginDialog.isShowing())) return;
+        final Dialog dialog=new Dialog(this); loginDialog=dialog; accountEpoch++; busyCount=0; showLoading();
+        LinearLayout form=column(); form.setPadding(dp(24),dp(26),dp(24),dp(20)); form.setBackground(bg(BG,24,0)); ScrollView scroll=new ScrollView(this); scroll.addView(form); dialog.setContentView(scroll);
+        form.addView(text("登录雨课堂",25,INK,true)); gap(form,10); form.addView(text("账号仅提交到所选雨课堂；密码不在本地保存。",12,MUTED,false)); gap(form,18);
+        Button server=button(RainApi.SERVICES[prefs.getInt("service",0)],false,() -> {}); form.addView(server); gap(form,14);
+        LinearLayout modes=row(); Button passwordMode=button("账号密码",false,() -> {}),smsMode=button("短信验证码",false,() -> {}); LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,dp(44),1); left.rightMargin=dp(5); modes.addView(passwordMode,left); LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,dp(44),1); right.leftMargin=dp(5); modes.addView(smsMode,right); form.addView(modes); gap(form,18);
+        android.widget.EditText identity=loginField("手机号或邮箱",false),secret=loginField("密码",true); form.addView(identity,lp(-1,50)); gap(form,12); form.addView(secret,lp(-1,50)); gap(form,12);
+        Button send=button("获取验证码",false,() -> {}); form.addView(send); gap(form,10); TextView message=text("",12,0xffa35445,false); message.setTextIsSelectable(true); form.addView(message); gap(form,10);
+        Button submit=button("登录",true,() -> {}); form.addView(submit); gap(form,10); Button qr=button("使用二维码登录",false,() -> { dialog.dismiss(); openLogin(); }); form.addView(qr); gap(form,10); form.addView(button("取消",false,dialog::dismiss));
+        class CredentialFlow {
+            boolean sms=smsFirst,busy,disposed; int service=prefs.getInt("service",0),run; RainApi client; Dialog challenge,picker;
+            String sentPhone=""; HumanVerification.Proof sentProof;
+            final java.util.Map<String,Long> cooldown=new java.util.HashMap<>();
+            final Runnable tick=new Runnable() { @Override public void run() { if(disposed||!dialog.isShowing()) return; labels(); ui.postDelayed(this,1000); } };
+            boolean active(int epoch,RainApi owner) { return !disposed&&dialog.isShowing()&&loginDialog==dialog&&run==epoch&&loginEpoch==epoch&&client==owner&&api==owner&&!owner.isClosed()&&user==null; }
+            void fields() {
+                identity.setHint(sms?"手机号":"手机号或邮箱"); identity.setContentDescription(sms?"手机号":"手机号或邮箱"); identity.setInputType(sms?android.text.InputType.TYPE_CLASS_PHONE:android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+                secret.setHint(sms?"短信验证码":"密码"); secret.setContentDescription(sms?"短信验证码":"密码"); secret.setInputType(sms?android.text.InputType.TYPE_CLASS_NUMBER:android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            }
+            void labels() {
+                passwordMode.setSelected(!sms); smsMode.setSelected(sms); passwordMode.setTextColor(!sms?WHITE:GREEN); passwordMode.setBackground(bg(!sms?GREEN:WHITE,12,!sms?0:LINE)); smsMode.setTextColor(sms?WHITE:GREEN); smsMode.setBackground(bg(sms?GREEN:WHITE,12,sms?0:LINE)); send.setVisibility(sms?View.VISIBLE:View.GONE);
+                long remaining=cooldown.getOrDefault(service+"|"+identity.getText().toString().trim(),0L)-android.os.SystemClock.elapsedRealtime(),seconds=Math.max(0,(remaining+999)/1000);
+                send.setText(seconds>0?seconds+" 秒后重试":"获取验证码"); send.setEnabled(!busy&&seconds==0&&client!=null); submit.setEnabled(!busy&&client!=null); submit.setText(busy?"处理中…":"登录"); identity.setEnabled(!busy); secret.setEnabled(!busy); qr.setEnabled(!busy);
+            }
+            void start() {
+                if(disposed) return; run=++loginEpoch; busy=false; sentPhone=""; sentProof=null; secret.setText(""); message.setText(""); fields(); if(challenge!=null) challenge.dismiss(); challenge=null;
+                retire(client==null?api:client); vault.clear();
+                try { prefs.edit().putInt("service",service).apply(); client=configureApi(createLoginClient(service,vault.session())); api=client; } catch(Exception e) { client=null; message.setText("登录服务无法连接，请重新选择版本"); }
+                server.setText(RainApi.SERVICES[service]); labels();
+            }
+            void fail(int epoch,RainApi owner,String reason) { if(!active(epoch,owner)) return; busy=false; message.setText(reason); labels(); }
+            void sendCode() {
+                if(busy||client==null) return; final String phone;
+                try { phone=LoginInput.phone(identity.getText().toString()); } catch(Exception e) { message.setText(e.getMessage()); return; }
+                if(cooldown.getOrDefault(service+"|"+phone,0L)>android.os.SystemClock.elapsedRealtime()) return;
+                final int epoch=run,selectedService=service; final RainApi owner=client; busy=true; message.setText(""); labels();
+                challenge=showHumanVerification(owner,new HumanVerification.Callback() {
+                    @Override public void verified(HumanVerification.Proof proof) {
+                        if(!active(epoch,owner)) return;
+                        work(() -> owner.sendLoginCode(phone,proof.ticket,proof.rand),ok -> { if(!active(epoch,owner)) return; sentPhone=phone; sentProof=proof; cooldown.put(selectedService+"|"+phone,android.os.SystemClock.elapsedRealtime()+60_000); busy=false; message.setText("验证码已发送，请查看短信"); labels(); secret.requestFocus(); },e -> fail(epoch,owner,"验证码发送失败："+error(e)));
+                    }
+                    @Override public void cancelled(String reason) { fail(epoch,owner,reason); }
+                });
+            }
+            void login() {
+                if(busy||client==null) return; final String account,value;
+                try { account=sms?LoginInput.phone(identity.getText().toString()):LoginInput.account(identity.getText().toString()); value=sms?LoginInput.code(secret.getText().toString()):LoginInput.password(secret.getText().toString()); } catch(Exception e) { message.setText(e.getMessage()); return; }
+                if(sms&&(sentProof==null||!account.equals(sentPhone))) { message.setText("请先为当前手机号获取验证码"); return; }
+                final int epoch=run; final RainApi owner=client; final boolean useSms=sms; busy=true; message.setText(""); labels();
+                HumanVerification.Callback action=new HumanVerification.Callback() {
+                    @Override public void verified(HumanVerification.Proof proof) {
+                        if(!active(epoch,owner)) return;
+                        work(() -> useSms?owner.smsLogin(account,value,proof.ticket,proof.rand):owner.passwordLogin(account,value,proof.ticket,proof.rand),profile -> { if(!active(epoch,owner)) return; secret.setText(""); sentProof=null; if(picker!=null) picker.dismiss(); loginSuccess(profile,owner); },e -> fail(epoch,owner,"登录失败："+error(e)));
+                    }
+                    @Override public void cancelled(String reason) { fail(epoch,owner,reason); }
+                };
+                if(useSms) action.verified(sentProof); else challenge=showHumanVerification(owner,action);
             }
             void dispose() {
-                if(picker!=null) picker.dismiss(); if(confirmation!=null) confirmation.dismiss();
-                if(loginDialog!=dialog) return;
-                loginDialog=null; loginEpoch++;
-                if(user==null) { vault.clear(); retire(attempt); try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception ignored) {} }
+                disposed=true; ui.removeCallbacks(tick); secret.setText(""); sentProof=null; if(challenge!=null) challenge.dismiss(); if(picker!=null) picker.dismiss();
+                if(loginDialog!=dialog) return; loginDialog=null; loginEpoch++;
+                if(user==null) { vault.clear(); retire(client); if(!isDestroyed()&&!isFinishing()) try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception ignored) {} }
             }
         }
-        LoginFlow flow=new LoginFlow();
-        serviceRow.setContentDescription("雨课堂版本："+RainApi.SERVICES[service[0]]+"，点击切换");
-        qrButton.setOnClickListener(v -> flow.confirmRefresh());
-        serviceRow.setOnClickListener(v -> { if(flow.picker!=null&&flow.picker.isShowing()) return; flow.picker=chooseService(service[0],index -> { if(!dialog.isShowing()||user!=null||index==service[0]) return; service[0]=index; serviceName.setText(RainApi.SERVICES[index]); serviceRow.setContentDescription("雨课堂版本："+RainApi.SERVICES[index]+"，点击切换"); flow.start(); }); });
-        dialog.setOnDismissListener(d -> flow.dispose()); dialog.show();
-        if(dialog.getWindow()!=null) { dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent); dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(32),dp(460)),-2); dialog.getWindow().setDimAmount(.32f); }
-        flow.start();
+        CredentialFlow flow=new CredentialFlow(); passwordMode.setOnClickListener(v -> { if(flow.sms) { flow.sms=false; flow.start(); } }); smsMode.setOnClickListener(v -> { if(!flow.sms) { flow.sms=true; flow.start(); } });
+        server.setOnClickListener(v -> { if(flow.picker!=null&&flow.picker.isShowing()) return; flow.picker=chooseService(flow.service,index -> { if(flow.disposed||index==flow.service) return; flow.service=index; flow.start(); }); }); submit.setOnClickListener(v -> flow.login()); send.setOnClickListener(v -> flow.sendCode());
+        dialog.setOnDismissListener(d -> flow.dispose()); dialog.show(); if(dialog.getWindow()!=null) { dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent); dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(32),dp(460)),-2); dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } flow.start(); ui.post(flow.tick);
     }
-    private RainApi configureApi(RainApi client) { client.configure(lessonCache.session()); client.setUserAgent(UserAgent.current(prefs)); client.setDeviceInfo(UserAgent.deviceBrand(),UserAgent.deviceVersion()); return client; }
+
+    private RainApi configureApi(RainApi client) { client.configure(lessonCache.session()); client.setDiagnostics(diagnostics,"client-"+java.util.UUID.randomUUID()); client.setUserAgent(UserAgent.current(prefs)); client.setDeviceInfo(UserAgent.deviceBrand(),UserAgent.deviceVersion()); return client; }
     protected RainApi createLoginClient(int service,RainApi.CookieStorage storage) throws Exception { return new RainApi(service,storage); }
 
     private void loginSuccess(JSONObject profile,RainApi a) { try { a.rememberLogin(); } catch(Exception e) { retire(a); toast(error(e)); return; } api=a; user=profile; loginEpoch++; if(loginDialog!=null) loginDialog.dismiss(); tab=0; catalog=null; onlyLive=false; courseError=null; courseUpdated=0; render(); loadCourses(); if(a.storageWarning()!=null) toast(a.storageWarning()); else toast("登录成功，欢迎回来"); }
+    private boolean checkingLocation;
+    private int locationRevision;
+    private Dialog locationDialog;
+    private boolean activeLocation(RainApi owner,String lesson,int revision) { return revision==locationRevision&&owner==api&&!owner.isClosed()&&lesson.equals(owner.lesson())&&!isDestroyed()&&!isFinishing(); }
+    private void cancelLocationFlow() { locationRevision++; checkingLocation=false; locationSubmitting=false; if(locationDialog!=null) locationDialog.dismiss(); locationDialog=null; }
     private void checkLocation() {
-        if(!hasLesson()||joining||locationSubmitting||locating) return; RainApi a=api;
-        work(a::locationStatus,data -> { JSONObject d=data.optJSONObject("data"); if(d==null) d=data;
-            if(d.optBoolean("signed")) { toast("位置签到已由雨课堂确认"); return; }
-            if(!d.optBoolean("needLocationSignIn")) { toast("当前没有确认需要位置签到"); return; }
-            new AlertDialog.Builder(this).setTitle("使用实际位置签到").setMessage("将获取当前手机位置，并直接提交到雨课堂。请确认你已到达课堂要求的位置。").setPositiveButton("获取位置并签到",(dialog,w) -> requestLocation()).setNegativeButton("取消",null).show();
-        });
+        if(!hasLesson()||joining||locationSubmitting||checkingLocation||(locationDialog!=null&&locationDialog.isShowing())) return;
+        RainApi owner=api; String lesson=owner.lesson(); int revision=++locationRevision; checkingLocation=true;
+        work(owner::locationInfo,info -> {
+            if(revision==locationRevision) checkingLocation=false; if(!activeLocation(owner,lesson,revision)) return;
+            if(info.signed) { toast("位置签到已由雨课堂确认"); return; }
+            if(Boolean.FALSE.equals(info.needed)) { toast("当前位置签到尚未开始或已结束"); return; }
+            try { info.requireAvailable(); } catch(Exception e) { toast(error(e)); return; }
+            if(tab!=1||dynamicView!=LIVE_READER) return;
+            Sheet sheet=createSheet(info.submitted?"等待签到确认":"位置签到",info.submitted?"本轮已提交位置，雨课堂尚未确认。刷新状态不会重复提交。":"将使用雨课堂返回的签到位置提交，不读取手机定位。"); locationDialog=sheet.dialog;
+            LinearLayout position=compactCard(); position.addView(text(info.address.isEmpty()?"课堂签到位置":info.address,14,INK,true)); gap(position,8); position.addView(text(String.format(java.util.Locale.ROOT,"%.6f, %.6f",info.point.lat,info.point.lng),12,MUTED,false)); sheet.panel.addView(position); gap(sheet.panel,16);
+            TextView result=text("",12,0xffa35445,false); sheet.panel.addView(result); gap(sheet.panel,10);
+            Button confirm=button(info.submitted?"本轮已提交":"确认位置签到",true,() -> {}); confirm.setEnabled(!info.submitted); sheet.panel.addView(confirm); gap(sheet.panel,10);
+            Button refresh=button("刷新状态",false,() -> { sheet.dialog.dismiss(); checkLocation(); }); sheet.panel.addView(refresh); gap(sheet.panel,10); Button cancel=button("关闭",false,sheet.dialog::dismiss); sheet.panel.addView(cancel);
+            confirm.setOnClickListener(v -> {
+                if(!activeLocation(owner,lesson,revision)||locationSubmitting) return;
+                locationSubmitting=true; confirm.setEnabled(false); confirm.setText("正在提交…"); refresh.setEnabled(false); cancel.setEnabled(false); sheet.dialog.setCancelable(false);
+                work(() -> owner.submitServerLocation(info),state -> {
+                    if(revision==locationRevision) locationSubmitting=false;
+                    if(!activeLocation(owner,lesson,revision)) { if(revision==locationRevision&&owner==api) sheet.dialog.dismiss(); return; }
+                    if(state.signed) { sheet.dialog.dismiss(); toast("位置签到成功，雨课堂已确认"); return; }
+                    confirm.setText("本轮已提交"); result.setText("位置已提交，雨课堂尚未确认。可刷新状态查看结果。"); refresh.setEnabled(true); cancel.setEnabled(true); sheet.dialog.setCancelable(true);
+                },e -> {
+                    if(revision==locationRevision) locationSubmitting=false;
+                    if(!activeLocation(owner,lesson,revision)) { if(revision==locationRevision&&owner==api) sheet.dialog.dismiss(); return; }
+                    result.setText(error(e)); confirm.setText("请重新查询状态"); refresh.setEnabled(true); cancel.setEnabled(true); sheet.dialog.setCancelable(true);
+                });
+            });
+            sheet.dialog.setOnDismissListener(d -> { if(locationDialog==sheet.dialog) locationDialog=null; }); showSheet(sheet);
+        },e -> { if(revision==locationRevision&&owner==api) { checkingLocation=false; toast(error(e)); } });
     }
-    private void requestLocation() {
-        if(locating) { toast("正在获取位置，请稍候"); return; }
-        if(checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED&&checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)!=PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION,Manifest.permission.ACCESS_COARSE_LOCATION},LOCATION); return; }
-        locate();
-    }
-    @android.annotation.SuppressLint("MissingPermission")
-    private void locate() {
-        locationManager=(LocationManager)getSystemService(LOCATION_SERVICE); if(locationManager==null) { toast("设备不支持定位"); return; }
-        locating=true; final int epoch=accountEpoch; final RainApi a=api; final String lesson=a.lesson();
-        locationListener=new LocationListener() {
-            @Override public void onLocationChanged(Location location) {
-                if(!locating) return;
-                long age=(android.os.SystemClock.elapsedRealtimeNanos()-location.getElapsedRealtimeNanos())/1000000;
-                if(age>30000||age<0) return; stopLocation(); if(epoch!=accountEpoch||a!=api||!lesson.equals(a.lesson())) return;
-                locationSubmitting=true; work(() -> a.submitLocation(location.getLatitude(),location.getLongitude()),state -> { locationSubmitting=false; JSONObject d=state.optJSONObject("data"); if(d==null) d=state; toast(d.optBoolean("signed")?"位置签到成功，雨课堂已确认":"已提交，雨课堂尚未确认签到，请重新查询"); },e -> { locationSubmitting=false; toast(error(e)); });
-            }
-            @Override public void onProviderEnabled(String provider) {}
-            @Override public void onProviderDisabled(String provider) {}
-            @Override public void onStatusChanged(String provider,int state,Bundle extras) {}
-        };
-        boolean active=false;
-        try { for(String provider:new String[]{LocationManager.GPS_PROVIDER,LocationManager.NETWORK_PROVIDER}) if(locationManager.isProviderEnabled(provider) && (!provider.equals(LocationManager.GPS_PROVIDER)||checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED)) { locationManager.requestLocationUpdates(provider,0,0,locationListener,Looper.getMainLooper()); active=true; } }
-        catch(SecurityException e) { stopLocation(); toast("定位权限被拒绝"); return; }
-        if(!active) { stopLocation(); toast("请先开启手机系统定位服务"); return; }
-        toast("正在获取手机实际位置…"); locationTimeout=() -> { stopLocation(); toast("定位超时，请到信号良好的位置重试"); }; ui.postDelayed(locationTimeout,25000);
-    }
-    private void stopLocation() { locating=false; if(locationManager!=null&&locationListener!=null) try { locationManager.removeUpdates(locationListener); } catch(SecurityException ignored) {} locationListener=null; if(locationTimeout!=null) ui.removeCallbacks(locationTimeout); locationTimeout=null; }
-    @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] grants) { super.onRequestPermissionsResult(request,permissions,grants); if(request==LOCATION) { boolean allow=false; for(int g:grants) if(g==PackageManager.PERMISSION_GRANTED) allow=true; if(allow&&hasLesson()) locate(); else toast("未获定位权限，可在系统设置中允许"); } }
     private void downloadOptions() {
         JSONObject shown=readerPresentation();
         if(shown==null||shown.optJSONArray("slides")==null||shown.optJSONArray("slides").length()==0) { toast("请先加载课件"); return; }
@@ -985,7 +1093,11 @@ public class MainActivity extends Activity {
         }
     }
     @Override protected void onActivityResult(int request,int result,Intent data) {
-        super.onActivityResult(request,result,data); if(request==SAVE_IMAGE) { singleImageResult(result,data); return; } if(request!=SAVE) return;
+        super.onActivityResult(request,result,data);
+        if(request==EXPORT_LOGS) {
+            if(result==RESULT_OK&&data!=null&&data.getData()!=null) { Uri destination=data.getData(); work(() -> { byte[] bytes=diagnostics.today(); if(bytes.length==0) throw new java.io.IOException("暂无可导出的诊断日志"); try(java.io.OutputStream output=getContentResolver().openOutputStream(destination,"wt")) { if(output==null) throw new java.io.IOException("无法保存日志"); output.write(bytes); } return true; },ok -> toast("诊断日志已导出")); }
+            return;
+        } if(request==SAVE_IMAGE) { singleImageResult(result,data); return; } if(request!=SAVE) return;
         String format=pendingFormat; JSONObject p=exportPresentation; RainApi owner=pendingExportApi; int ownerEpoch=pendingExportEpoch; pendingFormat=null; exportPresentation=null; pendingExportApi=null;
         if(result!=RESULT_OK||data==null||data.getData()==null||format==null||p==null) return;
         Uri destination=data.getData();
@@ -997,9 +1109,10 @@ public class MainActivity extends Activity {
         },ok -> { downloading=false; activeDownload=null; panel.finish(true,false,"课件已保存到所选位置"); },e -> { downloading=false; activeDownload=null; boolean cancelled=job.cancelled.get(); panel.finish(false,cancelled,cancelled?"保存任务已停止":error(e)); });
     }
 
-    @Override public void onBackPressed() { if(checkingCredentials&&cancelEntryLookup!=null) { cancelEntryLookup.run(); return; } if(tab==1&&dynamicView==HISTORY_READER) { dynamicView=DETAIL; render(); } else if(tab==1&&dynamicView!=FEED) showFeed(); else if(tab!=0) { tab=0; render(); } else super.onBackPressed(); }
+    @Override public void onBackPressed() { if(exitingForUpdate) return; if(pendingUpdate!=null&&pendingUpdate.required(BuildConfig.VERSION_CODE)) { showPendingUpdate(); return; } if(checkingCredentials&&cancelEntryLookup!=null) { cancelEntryLookup.run(); return; } if(tab==1&&dynamicView==HISTORY_READER) { dynamicView=DETAIL; render(); } else if(tab==1&&dynamicView!=FEED) showFeed(); else if(tab!=0) { tab=0; render(); } else super.onBackPressed(); }
+    @Override protected void onStart() { super.onStart(); checkForUpdates(false); }
     @Override protected void onStop() { flushActivityCache(); super.onStop(); }
-    @Override protected void onDestroy() { if(cancelEntryLookup!=null) cancelEntryLookup.run(); flushActivityCache(); feedIo.shutdown(); loginEpoch++; accountEpoch++; stopLocation(); if(fullDialog!=null) fullDialog.dismiss(); if(imageJob!=null) imageJob.cancel(); pendingImage=null; if(api!=null) api.cancel(); workers.shutdownNow(); ui.removeCallbacksAndMessages(null); super.onDestroy(); }
+    @Override protected void onDestroy() { if(humanVerificationDialog!=null) humanVerificationDialog.dismiss(); if(loginDialog!=null) loginDialog.dismiss(); if(updateChecker!=null) updateChecker.close(); updateIo.shutdownNow(); if(updateDialog!=null) updateDialog.dismiss(); if(qrController!=null) qrController.close(); if(diagnostics!=null) diagnostics.close(); if(cancelEntryLookup!=null) cancelEntryLookup.run(); flushActivityCache(); feedIo.shutdown(); loginEpoch++; accountEpoch++; cancelLocationFlow(); if(fullDialog!=null) fullDialog.dismiss(); if(imageJob!=null) imageJob.cancel(); pendingImage=null; if(api!=null) api.cancel(); workers.shutdownNow(); ui.removeCallbacksAndMessages(null); super.onDestroy(); }
     /** Consistent stroke icons, no font-dependent emoji or mismatched symbol baselines. */
     private static class Icon extends View {
         final int kind,color; final Paint paint=new Paint(3); final RectF rect=new RectF();

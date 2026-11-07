@@ -39,7 +39,8 @@ import static org.junit.Assert.*;
 @LooperMode(LooperMode.Mode.PAUSED)
 public class MainActivityFlowTest {
     private ActivityController<? extends MainActivity> controller;
-    public static class TestActivity extends MainActivity {  }
+    public static class TestActivity extends MainActivity {
+        @Override protected void checkForUpdates(boolean manual) {}  }
     private MainActivity activity;
     @Before public void create() {
         Context app=RuntimeEnvironment.getApplication();
@@ -377,7 +378,7 @@ public class MainActivityFlowTest {
     }
 
     @Test public void accountPageHasProjectAndAuthorButNoUpdateCheckEntry() throws Exception {
-        set("tab",2); call("render"); assertNull(find(root(),"检查更新")); assertNotNull(find(root(),"作者 FirmPluvia")); click(root(),"项目主页"); assertEquals("https://github.com/FirmPluvia/ykt_assistant",Shadows.shadowOf(activity).getNextStartedActivity().getDataString()); assertNotNull(find(root(),"雨课堂助手 3.0"));
+        set("tab",2); call("render"); assertNull(find(root(),"检查更新")); assertNotNull(find(root(),"作者 FirmPluvia")); click(root(),"项目主页"); assertEquals("https://github.com/FirmPluvia/ykt_assistant",Shadows.shadowOf(activity).getNextStartedActivity().getDataString()); assertNotNull(find(root(),"雨课堂助手 "+BuildConfig.VERSION_NAME));
     }
 
     @Test public void navigatingAwayDuringSilentLookupCancelsDelayedDialogAndEntry() throws Exception {
@@ -388,6 +389,30 @@ public class MainActivityFlowTest {
                 release.countDown(); waitFor(() -> { try { return ((Integer)get("busyCount"))==0; } catch(Exception e) { return false; } }); assertEquals(2,get("tab")); assertNull(api.lesson()); assertEquals(1,server.getRequestCount()); assertSame(previous,ShadowDialog.getLatestDialog());
             } finally { release.countDown(); }
         }
+    }
+
+    @Test public void diagnosticsCanBeExportedThroughTheSystemSaveFlow() throws Exception {
+        ((DiagnosticLog)get("diagnostics")).event("QR_WAIT",java.util.UUID.randomUUID().toString(),"BUSINESS_ERROR",200,50001,30_000); set("tab",2); call("render"); click(root(),"导出今日日志");
+        java.io.File file=java.io.File.createTempFile("diagnostic-export-",".log",activity.getCacheDir()); activity.onActivityResult(45,android.app.Activity.RESULT_OK,new Intent().setData(android.net.Uri.fromFile(file))); waitFor(() -> { try { return ((Integer)get("busyCount"))==0; } catch(Exception e) { return false; } });
+        String content=new String(java.nio.file.Files.readAllBytes(file.toPath()),java.nio.charset.StandardCharsets.UTF_8); assertTrue(content.contains("QR_WAIT")); assertTrue(content.contains("50001")); assertFalse(content.contains("sessionid=")); assertFalse(content.contains("csrftoken=")); file.delete();
+    }
+
+    private final String locationFixture="{\"needLocationSignIn\":true,\"signed\":false,\"session\":{\"centerLat\":31.25,\"centerLng\":121.5},\"address\":\"教学楼\"}";
+    private RainApi locationClass(MockWebServer server) throws Exception { RainApi api=installEntryApi(server); server.enqueue(response("{\"data\":{\"lessonToken\":\"ws\"}}").setHeader("set-auth","http")); api.checkin("lesson"); server.takeRequest(); set("tab",1); set("dynamicView",2); call("render"); return api; }
+    private boolean locationBusy() { try { return (Boolean)get("checkingLocation")||(Boolean)get("locationSubmitting"); } catch(Exception e) { return false; } }
+    @Test public void serverLocationNeedsConfirmationWithoutDeviceLocationPermission() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); click(root(),"查看位置签到状态"); waitFor(()->!locationBusy()); Dialog sheet=(Dialog)get("locationDialog"); assertNotNull(sheet); assertNotNull(find(sheet.getWindow().getDecorView(),"将使用雨课堂返回的签到位置提交，不读取手机定位。")); assertNotNull(find(sheet.getWindow().getDecorView(),"31.250000, 121.500000")); assertEquals("GET",server.takeRequest().getMethod()); assertEquals(3,server.getRequestCount());
+            server.enqueue(response(locationFixture)); server.enqueue(response("{\"code\":0}")); server.enqueue(response("{\"signed\":true}")); click(sheet.getWindow().getDecorView(),"确认位置签到"); waitFor(()->!locationBusy()); assertFalse(sheet.isShowing()); server.takeRequest(); assertEquals("POST",server.takeRequest().getMethod()); assertEquals("GET",server.takeRequest().getMethod()); assertNull(Shadows.shadowOf(activity).getLastRequestedPermission()); }
+    }
+    @Test public void pendingLocationRefreshNeverSubmitsTwice() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); call("checkLocation"); waitFor(()->!locationBusy()); server.takeRequest(); Dialog sheet=(Dialog)get("locationDialog"); server.enqueue(response(locationFixture)); server.enqueue(response("{\"code\":0}")); server.enqueue(response(locationFixture)); click(sheet.getWindow().getDecorView(),"确认位置签到"); waitFor(()->!locationBusy()); assertNotNull(find(sheet.getWindow().getDecorView(),"位置已提交，雨课堂尚未确认。可刷新状态查看结果。")); assertFalse(find(sheet.getWindow().getDecorView(),"本轮已提交").isEnabled()); for(int n=0;n<3;n++) server.takeRequest(); server.enqueue(response(locationFixture)); click(sheet.getWindow().getDecorView(),"刷新状态"); waitFor(()->!locationBusy()); assertEquals("GET",server.takeRequest().getMethod()); Dialog next=(Dialog)get("locationDialog"); assertNotNull(find(next.getWindow().getDecorView(),"等待签到确认")); assertFalse(find(next.getWindow().getDecorView(),"本轮已提交").isEnabled()); }
+    }
+    @Test public void queryFailureReleasesLocationBusyFlagForRetry() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(new MockResponse().setResponseCode(500)); call("checkLocation"); waitFor(()->!locationBusy()); assertNull(get("locationDialog")); server.takeRequest(); server.enqueue(response(locationFixture)); call("checkLocation"); waitFor(()->!locationBusy()); assertNotNull(get("locationDialog")); assertEquals("GET",server.takeRequest().getMethod()); }
+    }
+    @Test public void lateLocationQueryCannotOpenPromptAfterLogout() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1); server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() { @Override public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest request) { entered.countDown(); try { release.await(5,TimeUnit.SECONDS); } catch(InterruptedException e) { Thread.currentThread().interrupt(); } return response(locationFixture); } });
+            try { call("checkLocation"); assertTrue(entered.await(3,TimeUnit.SECONDS)); call("resetAccount"); release.countDown(); waitFor(()->!locationBusy()); assertNull(get("locationDialog")); assertNull(get("user")); } finally { release.countDown(); } }
     }
 
 }
