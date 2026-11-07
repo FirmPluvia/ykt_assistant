@@ -1,4 +1,4 @@
-# 雨课堂助手 · ykt_assistant
+# 雨课堂助手
 
 Android 8.0+ 原生直连客户端，版本 **3.2（versionCode 31）**。
 
