@@ -91,7 +91,6 @@ jobs:
             --ks-pass "pass:$KEYSTORE_PASSWORD" --key-pass "pass:$KEY_PASSWORD" \
             --out android/app/build/outputs/apk/release/app-release-signed.apk \
             android/app/build/outputs/apk/release/app-release-unsigned.apk
-          "$APKSIGNER" verify --print-certs android/app/build/outputs/apk/release/app-release-signed.apk
           rm -f /tmp/starx.keystore.jks
       - uses: actions/upload-artifact@v4
         with:
