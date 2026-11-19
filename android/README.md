@@ -10,4 +10,4 @@ sh ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebu
 
 调试 APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`。
 
-功能与使用入口见[项目 README](../README.md)，模块、签名及发布说明见[交接文档](../docs/HANDOFF.md)，各版本改动见[更新记录](../CHANGELOG.md)。
+功能与使用入口见[项目 README](../README.md)。
