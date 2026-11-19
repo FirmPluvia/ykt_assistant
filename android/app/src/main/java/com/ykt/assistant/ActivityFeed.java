@@ -16,6 +16,7 @@ final class ActivityFeed {
     static final class Entry {
         final JSONObject raw;
         Entry(JSONObject raw) { this.raw=raw; }
+        int type() { return raw.optInt("coursewareType",-1); }
         String lessonId() { return raw.optInt("coursewareType",-1)==14&&!raw.isNull("coursewareId")?raw.optString("coursewareId"):""; }
         String course() { return label(raw,"courseName","课程动态"); }
         String title() { return label(raw,"coursewareTitle","课堂记录"); }

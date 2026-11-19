@@ -18,6 +18,15 @@ final class UserAgent {
         for(int i=0;i<value.length()&&safe.length()<128;i++) { char c=value.charAt(i); if(c>=32&&c<=126&&c!='('&&c!=')'&&c!=';') safe.append(c); }
         String result=safe.toString().trim(); return result.isEmpty()?fallback:result;
     }
+    static String deviceSummary(String userAgent) {
+        if(userAgent==null) return "设备信息未提供";
+        java.util.regex.Matcher match=java.util.regex.Pattern.compile("Android\\s+([^;()]+)(?:;\\s*([^;()]*))?",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(userAgent);
+        if(!match.find()) return "设备信息未提供";
+        String version=match.group(1).trim().split("\\s+")[0],model=match.group(2)==null?"":match.group(2).trim();
+        model=model.replaceFirst("(?i)(?:^|\\s+)Build/.*$","").trim();
+        if(model.equalsIgnoreCase("wv")||model.equalsIgnoreCase("U")||model.matches("(?i)(?:aarch64|arm64(?:-v8a)?|armv7l|[a-z]{2}[-_][a-z]{2})")) model="";
+        return "Android "+version+(model.isEmpty()?"":"; "+model);
+    }
     static String deviceBrand() { return component(Build.BRAND,component(Build.MANUFACTURER,"Android")); }
     static String deviceVersion() { return component(Build.VERSION.RELEASE,"unknown"); }
     static String validate(String raw) {

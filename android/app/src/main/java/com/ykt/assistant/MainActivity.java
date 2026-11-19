@@ -27,6 +27,7 @@ import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -42,16 +43,32 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final int GREEN=0xff2c5846,INK=0xff263d32,MUTED=0xff7e8d81,BG=0xfff7f9f5,LINE=0xffe3e9df,PALE=0xffedf3e9,WHITE=0xffffffff;
     private static final String PROJECT_URL="https://github.com/FirmPluvia/ykt_assistant";
-    private static final int SAVE=42,SAVE_IMAGE=44,EXPORT_LOGS=45;
+    private static final int SAVE=42,SAVE_IMAGE=44,SCAN_LESSON=46;
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final ExecutorService workers=Executors.newFixedThreadPool(4);
     private final LruCache<String,Bitmap> bitmaps=new LruCache<String,Bitmap>(16*1024*1024) {
         @Override protected int sizeOf(String key,Bitmap value) { return value.getAllocationByteCount(); }
     };
     private RainApi api;
+    private boolean foreground,classroomRetryScheduled,classroomFinished;
+    private int classroomConnectionRevision;
+    private LessonQuiz lessonQuiz;
+    private ClassroomQuizDialog quizDialog;
+    private AiSettingsDialog aiSettingsDialog;
+    private Button quizEntry;
     private QrLoginController qrController;
-    private DiagnosticLog diagnostics;
     private SessionVault vault;
+    private CookieSettings cookieSettings;
+    private AccountStore accounts;
+    private String addingAccountFrom;
+    private boolean switchingAccount;
+    private MultiAccountCheckin batchCheckin;
+    private java.util.concurrent.atomic.AtomicBoolean dynamicCredentialLookup;
+    private String pendingLiveReportId;
+    private RainApi scanOwner;
+    private int scanEpoch,scanService;
+    private boolean scanningLesson,resolvingLessonScan;
+    private Dialog cookieDialog;
     private LessonCache lessonCache;
     private SharedPreferences prefs;
     private LinearLayout root,body,nav;
@@ -100,23 +117,23 @@ public class MainActivity extends Activity {
     private void gap(LinearLayout layout,int height) { View v=new View(this); layout.addView(v,lp(1,height)); }
     private TextView text(String value,int size,int color,boolean bold) { TextView t=new TextView(this); t.setText(value); t.setTextSize(size); t.setTextColor(color); t.setIncludeFontPadding(false); t.setLineSpacing(dp(3),1); if(bold) t.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL)); return t; }
     private Button button(String label,boolean primary,Runnable action) {
-        Button b=new Button(this); b.setAllCaps(false); b.setText(label); b.setTextSize(13); b.setTextColor(primary?WHITE:GREEN); b.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL)); b.setIncludeFontPadding(false);
+        Button b=new FlatButton(this); b.setAllCaps(false); b.setText(label); b.setTextSize(13); b.setTextColor(primary?WHITE:GREEN); b.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL)); b.setIncludeFontPadding(false);
         b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0); b.setPadding(dp(16),0,dp(16),0); b.setBackground(bg(primary?GREEN:WHITE,12,primary?0:LINE));
         b.setStateListAnimator(null); b.setOnClickListener(v -> action.run()); b.setLayoutParams(lp(-1,48)); return b;
     }
     private TextView pill(String value,int color,int background) { TextView t=text(value,11,color,true); t.setPadding(dp(10),dp(5),dp(10),dp(5)); t.setBackground(bg(background,20,0)); t.setGravity(Gravity.CENTER); return t; }
-    private LinearLayout compactCard() { LinearLayout c=column(); c.setPadding(dp(16),dp(14),dp(16),dp(14)); c.setBackground(bg(WHITE,16,LINE)); return c; }
-    private LinearLayout card() { LinearLayout c=column(); c.setPadding(dp(20),dp(20),dp(20),dp(20)); c.setBackground(bg(WHITE,20,LINE)); return c; }
-    private void addCard(LinearLayout c) { body.addView(c,lp(-1,-2)); gap(body,16); }
+    private LinearLayout compactCard() { LinearLayout c=column(); c.setPadding(dp(16),dp(12),dp(16),dp(12)); c.setBackground(bg(WHITE,16,LINE)); return c; }
+    private LinearLayout card() { LinearLayout c=column(); c.setPadding(dp(18),dp(18),dp(18),dp(18)); c.setBackground(bg(WHITE,20,LINE)); return c; }
+    private void addCard(LinearLayout c) { body.addView(c,lp(-1,-2)); gap(body,12); }
     private TextView lineLabel(String value) { TextView t=text(value,11,MUTED,true); t.setLetterSpacing(.12f); return t; }
     private void backLink(String label,Runnable action) {
         TextView back=text("← "+label,14,GREEN,true); back.setMinHeight(dp(44)); back.setGravity(Gravity.CENTER_VERTICAL); back.setOnClickListener(v -> action.run()); body.addView(back); gap(body,4);
     }
-    private void heading(String eyebrow,String title,String subtitle) { body.addView(lineLabel(eyebrow)); gap(body,10); body.addView(text(title,28,INK,true)); gap(body,10); body.addView(text(subtitle,13,MUTED,false)); gap(body,24); }
-    private void section(String title,String right,Runnable action) { LinearLayout r=row(); r.addView(text(title,18,INK,true),new LinearLayout.LayoutParams(0,-2,1)); if(right!=null) { TextView t=text(right,12,GREEN,true); t.setGravity(Gravity.CENTER); t.setPadding(dp(14),dp(12),0,dp(12)); t.setMinHeight(dp(44)); t.setOnClickListener(v -> action.run()); r.addView(t); } body.addView(r,lp(-1,-2)); gap(body,12); }
+    private void heading(String eyebrow,String title,String subtitle) { body.addView(lineLabel(eyebrow)); gap(body,8); body.addView(text(title,26,INK,true)); gap(body,6); body.addView(text(subtitle,12,MUTED,false)); gap(body,16); }
+    private void section(String title,String right,Runnable action) { LinearLayout r=row(); r.addView(text(title,17,INK,true),new LinearLayout.LayoutParams(0,-2,1)); if(right!=null) { TextView t=text(right,12,GREEN,true); t.setGravity(Gravity.CENTER); t.setPadding(dp(14),dp(12),0,dp(12)); t.setMinHeight(dp(44)); t.setOnClickListener(v -> action.run()); r.addView(t); } body.addView(r,lp(-1,-2)); gap(body,10); }
     @Override public void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState); prefs=getSharedPreferences("native_preferences",MODE_PRIVATE); vault=new SessionVault(this);
-        lessonCache=new LessonCache(this); activityStore=new FeedStore(this); diagnostics=new DiagnosticLog(this); diagnostics.event("APP","startup","OPEN",0,0,0);
+        super.onCreate(savedInstanceState); prefs=getSharedPreferences("native_preferences",MODE_PRIVATE); vault=new SessionVault(this); cookieSettings=new CookieSettings(this); accounts=new AccountStore(this);
+        lessonCache=new LessonCache(this); activityStore=new FeedStore(this);
         // The v1 WebView relay configuration is intentionally neither read nor used.
         getSharedPreferences("assistant",MODE_PRIVATE).edit().clear().apply();
         root=column(); root.setBackgroundColor(BG);
@@ -136,18 +153,11 @@ public class MainActivity extends Activity {
         } catch(Exception e) { vault.clear(); toast("本机会话无法读取，请重新登录"); try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception ignored) {} }
         restoreStartupSession();
     }
-    protected RainApi createStartupApi() throws Exception { return configureApi(new RainApi(prefs.getInt("service",0),vault.session())); }
-    private void migrateLegacyLogs() {
-        if(prefs.getBoolean("legacy_logs_removed_v273",false)) return;
-        workers.execute(() -> {
-            try {
-                LegacyLogCleanup.remove(new java.io.File(LessonCache.privateRoot(this),"logs"));
-                LegacyLogCleanup.remove(new java.io.File(getFilesDir(),"logs"));
-                prefs.edit().putBoolean("legacy_logs_removed_v273",true).apply();
-            } catch(Exception ignored) { /* Retry upgrade cleanup on the next launch. */ }
-        });
-    }
+    protected RainApi createStartupApi() throws Exception { RainApi current=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); AccountStore.Account saved=accounts.get(accounts.active()); if(!current.hasCookies()&&saved!=null) { current.close(); prefs.edit().putInt("service",saved.service).apply(); return createSavedAccountClient(saved); } return current; }
+
     private void render() {
+        updateClassroomRetry();
+        if(user!=null&&cookieDialog!=null&&cookieDialog.getWindow()!=null) { View loginAction=cookieDialog.getWindow().getDecorView().findViewWithTag("cookie-login-action"); if(loginAction!=null) loginAction.setVisibility(View.GONE); }
         imageEpoch++;
         if(tab==1&&dynamicView==FEED&&user!=null&&feedScroll!=null&&feedAccount==accountEpoch&&!resetFeedScroll) {
             contentScroll=feedScroll; body=feedBody;
@@ -174,7 +184,7 @@ public class MainActivity extends Activity {
             TextView label=text(labels[i],11,selected?GREEN:MUTED,selected); label.setGravity(Gravity.CENTER); item.addView(label,lp(-1,-2));
             nav.addView(item,new LinearLayout.LayoutParams(0,-1,1));
             item.setContentDescription(labels[i]); item.setFocusable(true);
-            item.setOnClickListener(v -> { if(target!=tab&&cancelEntryLookup!=null) cancelEntryLookup.run(); if(target==1) { tab=1; showFeed(); if(user!=null&&!loadingActivities) loadActivities(); } else if(tab!=target) { tab=target; render(); } });
+            item.setOnClickListener(v -> { if(target!=tab&&dynamicCredentialLookup!=null) dynamicCredentialLookup.set(true); if(target!=tab&&cancelEntryLookup!=null) cancelEntryLookup.run(); if(target==1) { tab=1; showFeed(); if(user!=null&&!loadingActivities) loadActivities(); } else if(tab!=target) { tab=target; render(); } });
         }
     }
     private void courseFilters() {
@@ -185,9 +195,9 @@ public class MainActivity extends Activity {
             TextView choice=text(labels[i],12,selected?GREEN:MUTED,selected); choice.setGravity(Gravity.CENTER); choice.setSelected(selected);
             choice.setBackground(new RippleDrawable(ColorStateList.valueOf(0x142c5846),bg(selected?WHITE:PALE,11,selected?LINE:0),bg(WHITE,11,0)));
             choice.setOnClickListener(v -> { if(onlyLive!=live) { onlyLive=live; render(); } }); choice.setFocusable(true);
-            LinearLayout.LayoutParams c=new LinearLayout.LayoutParams(0,dp(48),1); c.setMargins(dp(2),0,dp(2),0); segmented.addView(choice,c);
+            LinearLayout.LayoutParams c=new LinearLayout.LayoutParams(0,dp(44),1); c.setMargins(dp(2),0,dp(2),0); segmented.addView(choice,c);
         }
-        body.addView(segmented,lp(-1,56)); gap(body,16);
+        body.addView(segmented,lp(-1,52)); gap(body,12);
     }
     private void coursesPage() {
         heading("YOUR LEARNING SPACE",user==null?"每一堂课，都从容开始":user.optString("name","同学")+"，上课见",user==null?"查看课堂，轻松签到，把重要的每一页留在身边。":"先上好这一堂课，再把知识留在身边。");
@@ -197,7 +207,8 @@ public class MainActivity extends Activity {
             Button start=button("扫码登录雨课堂",false,this::openLogin); start.setBackground(bg(0xffedf2e6,12,0)); hero.addView(start); addCard(hero); return;
         }
         boolean hasLive=catalog!=null&&catalog.hasLive();
-        LinearLayout stats=row(); stat(stats,"我的课程",catalog==null?"—":String.valueOf(catalog.courseCount)); if(hasLive) stat(stats,"正在上课",String.valueOf(catalog.liveCount())); stat(stats,"当前入课",hasLesson()?"1":"0"); body.addView(stats,lp(-1,-2)); gap(body,24);
+        LinearLayout stats=row(); stat(stats,"我的课程",catalog==null?"—":String.valueOf(catalog.courseCount)); stat(stats,"正在上课",catalog==null?"—":hasLive?String.valueOf(catalog.liveCount()):"无"); body.addView(stats,lp(-1,-2)); gap(body,16);
+        LinearLayout entryActions=row(); Button idEntry=button("使用课堂 ID 入课",false,this::openLessonIdEntry),scanEntry=button("扫码入课",false,this::openLessonScanner); idEntry.setTextSize(12); scanEntry.setTextSize(12); entryActions.addView(idEntry,new LinearLayout.LayoutParams(0,dp(48),1)); LinearLayout.LayoutParams scanParams=new LinearLayout.LayoutParams(0,dp(48),1); scanParams.leftMargin=dp(10); entryActions.addView(scanEntry,scanParams); body.addView(entryActions); gap(body,12);
         section(hasLive?"我的课堂":"全部课程",loadingCourses?"刷新中…":"刷新课堂",this::loadCourses);
         if(hasLive) courseFilters();
         if(courseError!=null) {
@@ -210,7 +221,7 @@ public class MainActivity extends Activity {
         if(courseUpdated>0) { TextView updated=text("更新于 "+android.text.format.DateFormat.format("HH:mm",courseUpdated)+" · 来自雨课堂",10,MUTED,false); updated.setGravity(Gravity.CENTER); body.addView(updated); }
     }
     private void stat(LinearLayout row,String label,String value) {
-        LinearLayout item=column(); item.setPadding(dp(14),dp(16),dp(12),dp(16)); item.setBackground(bg(WHITE,16,LINE)); item.addView(text(value,25,INK,true)); gap(item,8); item.addView(text(label,11,MUTED,false));
+        LinearLayout item=column(); item.setPadding(dp(14),dp(12),dp(12),dp(12)); item.setBackground(bg(WHITE,16,LINE)); item.addView(text(value,23,INK,true)); gap(item,6); item.addView(text(label,11,MUTED,false));
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,-2,1);
         if(row.getChildCount()>0) { p.leftMargin=dp(5); View previous=row.getChildAt(row.getChildCount()-1); LinearLayout.LayoutParams prev=(LinearLayout.LayoutParams)previous.getLayoutParams(); prev.rightMargin=dp(5); previous.setLayoutParams(prev); }
         row.addView(item,p);
@@ -223,9 +234,61 @@ public class MainActivity extends Activity {
         JSONObject teacher=c.optJSONObject("teacher"); String teacherName=teacher==null?"":teacher.optString("name",""); gap(names,6); TextView teacherLabel=text(teacherName.isEmpty()?"教师待更新":teacherName,12,MUTED,false); teacherLabel.setSingleLine(true); teacherLabel.setEllipsize(android.text.TextUtils.TruncateAt.END); names.addView(teacherLabel);
         top.addView(names,new LinearLayout.LayoutParams(0,-2,1)); TextView state=pill(live?"正在上课":"暂未上课",live?GREEN:MUTED,live?PALE:BG); LinearLayout.LayoutParams badge=lp(-2,-2); badge.leftMargin=dp(10); top.addView(state,badge); card.addView(top);
         if(live) {
-            gap(card,14); card.addView(button("查看课堂",true,() -> confirmCheckin(item)));
+            gap(card,10); LinearLayout actions=row(); actions.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+            TextView copy=text("复制课堂 ID",11,GREEN,true); copy.setGravity(Gravity.CENTER); copy.setLayoutDirection(View.LAYOUT_DIRECTION_LTR); copy.setPadding(dp(6),0,dp(6),0); copy.setBackground(new RippleDrawable(ColorStateList.valueOf(0x142c5846),bg(PALE,10,0),bg(WHITE,10,0))); copy.setContentDescription("复制课堂 ID："+item.live.optString("lessonId","")); copy.setFocusable(true); copy.setOnClickListener(v -> copyLessonId(item.live.optString("lessonId","")));
+            LinearLayout.LayoutParams copyParams=lp(96,44); copyParams.rightMargin=dp(10); actions.addView(copy,copyParams); actions.addView(button("查看课堂",true,() -> confirmCheckin(item)),new LinearLayout.LayoutParams(0,dp(46),1)); card.addView(actions);
         }
         card.setMinimumHeight(dp(84)); addCard(card);
+    }
+    private void copyLessonId(String id) {
+        if(id.isEmpty()) { toast("未获取到课堂 ID，请刷新课堂"); return; }
+        android.content.ClipboardManager clipboard=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if(clipboard==null) { toast("无法访问剪贴板"); return; }
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("雨课堂课堂 ID",id)); toast("课堂 ID 已复制");
+    }
+    private void openLessonScanner() {
+        if(user==null||api==null||api.isClosed()) { openLogin(); return; }
+        if(accountOperationBlocked()) { toast("请先完成当前任务"); return; }
+        scanOwner=api; scanEpoch=accountEpoch; scanService=prefs.getInt("service",0); scanningLesson=true;
+        try { startActivityForResult(new Intent(this,QrScanActivity.class),SCAN_LESSON); }
+        catch(Exception e) { scanningLesson=false; scanOwner=null; toast("无法打开扫码页面，可使用课堂 ID 入课"); }
+    }
+    private void scannedLessonResult(int result,Intent data) {
+        scanningLesson=false; RainApi owner=scanOwner; int epoch=scanEpoch,service=scanService; scanOwner=null;
+        if(result!=RESULT_OK||data==null) return;
+        if(owner==null||api!=owner||owner.isClosed()||epoch!=accountEpoch||user==null) { toast("账号已变更，请重新扫码"); return; }
+        LessonQr.Payload payload;
+        try { payload=LessonQr.parse(data.getStringExtra(QrScanActivity.CONTENT),service); }
+        catch(IllegalArgumentException e) { lessonScanFailure(e.getMessage()); return; }
+        resolvingLessonScan=true;
+        work(() -> owner.resolveLessonQr(payload),id -> {
+            resolvingLessonScan=false; if(api!=owner||owner.isClosed()||epoch!=accountEpoch) return;
+            CourseCatalog.Entry selected=null; if(catalog!=null) for(CourseCatalog.Entry entry:catalog.entries(false)) if(entry.live!=null&&id.equals(entry.live.optString("lessonId"))) { selected=entry; break; }
+            if(selected==null) selected=new CourseCatalog.Entry(RainApi.object("course_name","课堂 "+id),RainApi.object("lessonId",id)); confirmCheckin(selected);
+        },e -> { resolvingLessonScan=false; if(api==owner&&epoch==accountEpoch) lessonScanFailure(error(e)); });
+    }
+    private void lessonScanFailure(String message) {
+        Sheet sheet=createSheet("暂时无法扫码入课",message); sheet.panel.addView(button("重新扫码",true,() -> { sheet.dialog.dismiss(); openLessonScanner(); }));  showSheet(sheet);
+    }
+    private void openLessonIdEntry() {
+        if(user==null||api==null||api.isClosed()) { openLogin(); return; }
+        if(checkingCredentials||joining||locationSubmitting||checkingLocation||scanningLesson||resolvingLessonScan) { toast("请先完成当前课堂操作"); return; }
+        if(downloading||pendingFormat!=null) { toast("请先完成课件保存，再切换课堂"); return; }
+        RainApi owner=api; int account=accountEpoch;
+        Sheet sheet=createSheet("使用课堂 ID 入课","请输入本次上课的课堂 ID。");
+        android.widget.EditText input=loginField("课堂 ID",false); input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER); input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE); sheet.panel.addView(input,lp(-1,50)); gap(sheet.panel,10);
+        TextView issue=text("",12,0xffa35445,false); sheet.panel.addView(issue); gap(sheet.panel,10);
+        Button next=button("继续入课",true,() -> {}); sheet.panel.addView(next);
+        next.setOnClickListener(v -> {
+            if(api!=owner||accountEpoch!=account||owner.isClosed()) { sheet.dialog.dismiss(); return; }
+            String id=input.getText().toString().trim();
+            if(!id.matches("[0-9]{1,20}")||id.matches("0+")) { issue.setText("请输入有效的数字课堂 ID（最多 20 位）"); return; }
+            CourseCatalog.Entry selected=null;
+            if(catalog!=null) for(CourseCatalog.Entry entry:catalog.entries(false)) if(entry.live!=null&&id.equals(entry.live.optString("lessonId"))) { selected=entry; break; }
+            if(selected==null) try { selected=new CourseCatalog.Entry(RainApi.object("course_name","课堂 "+id),RainApi.object("lessonId",id)); } catch(Exception e) { issue.setText("无法读取课堂 ID，请重新输入"); return; }
+            next.setEnabled(false); sheet.dialog.dismiss(); confirmCheckin(selected);
+        });
+        input.setOnEditorActionListener((v,action,event) -> { if(action==android.view.inputmethod.EditorInfo.IME_ACTION_DONE) { next.performClick(); return true; } return false; }); showSheet(sheet);
     }
     private boolean hasLesson() { return api!=null&&api.lesson()!=null; }
     private void loadCourses() {
@@ -239,7 +302,7 @@ public class MainActivity extends Activity {
     private void confirmCheckin(CourseCatalog.Entry entry) {
         if(user==null||api==null||api.isClosed()) { openLogin(); return; }
         if(checkingCredentials) { toast("正在读取课堂凭证，请稍候"); return; }
-        if(joining||locationSubmitting||checkingLocation) { toast("请先完成当前课堂操作"); return; }
+        if(joining||locationSubmitting||checkingLocation||batchCheckin!=null||switchingAccount||scanningLesson||resolvingLessonScan) { toast("请先完成当前课堂操作"); return; }
         if(downloading||pendingFormat!=null) { toast("请先完成课件保存，再切换课堂"); return; }
         if(entry.live==null||entry.live.optString("lessonId","").isEmpty()) { toast("当前课程没有正在进行的课堂"); return; }
         final RainApi owner=api; final String id=entry.live.optString("lessonId"); final int revision=++entryRevision,account=accountEpoch;
@@ -249,7 +312,7 @@ public class MainActivity extends Activity {
         Runnable showWaiting=() -> {
             if(completed[0]||cancelled.get()||revision!=entryRevision||account!=accountEpoch||api!=owner||isDestroyed()||isFinishing()) return;
             Sheet sheet=createSheet("读取课堂凭证","正在检查本机保存的课堂凭证。"); waiting[0]=sheet;
-            ProgressBar progress=new ProgressBar(this); progress.setIndeterminateTintList(ColorStateList.valueOf(GREEN)); LinearLayout.LayoutParams pp=lp(28,28); pp.gravity=Gravity.CENTER_HORIZONTAL; sheet.panel.addView(progress,pp); gap(sheet.panel,20); sheet.panel.addView(button("暂不进入",false,sheet.dialog::dismiss));
+            ProgressBar progress=new ProgressBar(this); progress.setIndeterminateTintList(ColorStateList.valueOf(GREEN)); LinearLayout.LayoutParams pp=lp(28,28); pp.gravity=Gravity.CENTER_HORIZONTAL; sheet.panel.addView(progress,pp); gap(sheet.panel,20);
             sheet.dialog.setOnDismissListener(d -> { if(!completed[0]) { cancelled.set(true); if(revision==entryRevision) { checkingCredentials=false; entryRevision++; cancelEntryLookup=null; } } }); showSheet(sheet);
         };
         cancelEntryLookup=() -> {
@@ -273,26 +336,163 @@ public class MainActivity extends Activity {
     private void showEntryDialog(CourseCatalog.Entry entry) {
         String id=entry.live.optString("lessonId"); RainApi owner=api;
         Sheet sheet=createSheet("未找到课堂凭证","是否签到并进入课堂？");
-        LinearLayout summary=compactCard(); summary.addView(text(entry.course.optString("course_name","当前课堂"),17,INK,true)); JSONObject teacher=entry.course.optJSONObject("teacher"); if(teacher!=null&&!teacher.optString("name","").isEmpty()) { gap(summary,8); summary.addView(text(teacher.optString("name"),12,MUTED,false)); } sheet.panel.addView(summary); gap(sheet.panel,18);
-        TextView errorLabel=text("",12,0xffa35445,false); sheet.panel.addView(errorLabel); gap(sheet.panel,6);
-        Button confirm=button("签到并进入课堂",true,() -> {}); sheet.panel.addView(confirm); gap(sheet.panel,10); Button cancel=button("暂不进入",false,sheet.dialog::dismiss); sheet.panel.addView(cancel);
+        LinearLayout summary=compactCard(); summary.addView(text(entry.course.optString("course_name","当前课堂"),17,INK,true)); gap(summary,6); summary.addView(text("课堂 ID："+id,12,MUTED,false)); JSONObject teacher=entry.course.optJSONObject("teacher"); if(teacher!=null&&!teacher.optString("name","").isEmpty()) { gap(summary,8); summary.addView(text(teacher.optString("name"),12,MUTED,false)); } sheet.panel.addView(summary); gap(sheet.panel,18);
+        SyncSettings sync=syncSettings();SyncControls others=sync==null?null:new SyncControls(this,sync,SyncSettings.CHECKIN,null);if(others!=null&&sync.available())sheet.panel.addView(others);
+        gap(sheet.panel,12);
+        TextView errorLabel=text("",12,0xffa35445,false); sheet.panel.addView(errorLabel); gap(sheet.panel,10);
+        Button confirm=button("签到并进入课堂",true,() -> {}); sheet.panel.addView(confirm); View cancel=sheet.close;
         confirm.setOnClickListener(v -> {
             if(api!=owner||owner==null||owner.isClosed()||joining) return;
-            joining=true; confirm.setEnabled(false); confirm.setText("正在进入课堂…"); cancel.setEnabled(false); sheet.dialog.setCancelable(false); errorLabel.setText("");
+            joining=true; if(others!=null)others.setEnabled(false); confirm.setEnabled(false); confirm.setText("正在进入课堂…"); cancel.setEnabled(false); sheet.dialog.setCancelable(false); errorLabel.setText("");
             work(() -> { owner.checkin(id); return true; },ok -> {
                 joining=false; sheet.dialog.dismiss(); showLiveClass(entry,true); toast(owner.storageWarning()!=null?owner.storageWarning():"入课并签到成功，位置签到可单独查询");
-            },e -> { joining=false; confirm.setEnabled(true); confirm.setText("重试进入课堂"); cancel.setEnabled(true); sheet.dialog.setCancelable(true); errorLabel.setText(error(e)); });
+            },e -> { joining=false; if(others!=null)others.setEnabled(true); confirm.setEnabled(true); confirm.setText("重试进入课堂"); cancel.setEnabled(true); sheet.dialog.setCancelable(true); errorLabel.setText(error(e)); });
         });
         showSheet(sheet);
     }
     private void showLiveClass(CourseCatalog.Entry entry,boolean fresh) {
         currentCourse=entry.course.optString("course_name","当前课堂");
-        if(fresh) { cancelLocationFlow(); lessonEpoch++; fetchingPpt=false; presentation=null; page=0; bitmaps.evictAll(); connection="正在连接课堂…"; }
-        tab=1; dynamicView=LIVE_READER; render(); if(fresh) connectClass();
+        if(fresh) { classroomFinished=false; classroomConnectionRevision++; closeQuiz(); ensureQuiz(); cancelLocationFlow(); lessonEpoch++; fetchingPpt=false; presentation=null; page=0; bitmaps.evictAll(); connection="正在连接课堂…"; }
+        tab=1; dynamicView=LIVE_READER; render(); if(fresh)connectClass();SyncSettings sync=syncSettings();if(sync!=null&&sync.available()&&sync.enabled(SyncSettings.CHECKIN))startOtherCheckins(api.lesson(),sync.selected(SyncSettings.CHECKIN));
     }
     private static final int FEED=0,DETAIL=1,LIVE_READER=2,HISTORY_READER=3;
     private ActivityFeed activityFeed;
     private int feedVisibleLimit=10;
+    private String activityCourseFilter="";
+    private int activityTypeFilter=0;
+
+    private boolean hasActivityFilter() {
+        return !activityCourseFilter.isEmpty() || activityTypeFilter!=0;
+    }
+
+    private List<ActivityFeed.Entry> displayedActivities() {
+        if(activityFeed==null) return java.util.Collections.emptyList();
+        if(!hasActivityFilter()) return activityFeed.entries.subList(0,visibleActivityCount());
+        String query=activityCourseFilter.toLowerCase(java.util.Locale.ROOT);
+        List<ActivityFeed.Entry> matches=new ArrayList<>();
+        for(ActivityFeed.Entry entry:cachedActivities()) {
+            if(activityTypeFilter!=0 && entry.type()!=activityTypeFilter) continue;
+            String courseName=ActivityFeed.label(entry.raw,"courseName","");
+            String normalizedName=courseName.toLowerCase(java.util.Locale.ROOT);
+            boolean matchesCourse=query.isEmpty() || normalizedName.equals(query);
+            if(matchesCourse) matches.add(entry);
+        }
+        return matches;
+    }
+
+    private List<ActivityFeed.Entry> cachedActivities() {
+        if(activityFeed==null) return java.util.Collections.emptyList();
+        return activityTimeline==null ? activityFeed.entries : activityTimeline.cachedEntries();
+    }
+
+    private android.widget.RadioButton addFilterOption(android.widget.RadioGroup group,String label,int value) {
+        android.widget.RadioButton option=new android.widget.RadioButton(this);
+        option.setId(View.generateViewId());
+        option.setTag(value);
+        option.setText(label);
+        option.setMinHeight(dp(44));
+        option.setTextColor(INK);
+        group.addView(option);
+        return option;
+    }
+
+    private void openActivityFilters() {
+        int epoch=accountEpoch;
+        Sheet sheet=createSheet("筛选动态","筛选本机已加载或缓存的记录。");
+        android.widget.RadioGroup types=new android.widget.RadioGroup(this);
+        String[] labels={"全部类型","作业","课堂"};
+        int[] values={0,5,14};
+        for(int i=0;i<labels.length;i++) {
+            int id=addFilterOption(types,labels[i],values[i]).getId();
+            if(values[i]==activityTypeFilter) types.check(id);
+        }
+        sheet.panel.addView(types); gap(sheet.panel,12);
+
+        List<ActivityFeed.Entry> cached=cachedActivities();
+        String[] selectedCourse={activityCourseFilter};
+        Dialog[] coursePicker={null};
+        Button courseButton=button(activityCourseLabel(selectedCourse[0]),false,() -> {});
+        courseButton.setMinimumHeight(dp(44));
+        sheet.panel.addView(courseButton,lp(-1,-2));
+        courseButton.setOnClickListener(v -> {
+            if(epoch!=accountEpoch || (coursePicker[0]!=null&&coursePicker[0].isShowing())) return;
+            View option=types.findViewById(types.getCheckedRadioButtonId());
+            int type=option==null?0:(Integer)option.getTag();
+            coursePicker[0]=showActivityCoursePicker(activityCourseNames(cached,type),selectedCourse[0],name -> {
+                if(epoch!=accountEpoch||!sheet.dialog.isShowing()) return;
+                selectedCourse[0]=name;
+                courseButton.setText(activityCourseLabel(name));
+            });
+        });
+        types.setOnCheckedChangeListener((group,id) -> {
+            View option=group.findViewById(id);
+            if(option==null) return;
+            if(!activityCourseNames(cached,(Integer)option.getTag()).containsKey(selectedCourse[0])) {
+                selectedCourse[0]="";
+                courseButton.setText(activityCourseLabel(""));
+            }
+        });
+        sheet.dialog.setOnDismissListener(dialog -> {
+            if(coursePicker[0]!=null) coursePicker[0].dismiss();
+        });
+        gap(sheet.panel,12);
+        sheet.panel.addView(button("应用筛选",true,() -> {
+            View option=types.findViewById(types.getCheckedRadioButtonId());
+            int type=option==null?0:(Integer)option.getTag();
+            sheet.dialog.dismiss();
+            if(epoch==accountEpoch) applyActivityFilter(selectedCourse[0],type);
+        }));
+        gap(sheet.panel,8);
+        sheet.panel.addView(button("清除筛选",false,() -> {
+            sheet.dialog.dismiss();
+            if(epoch==accountEpoch) applyActivityFilter("",0);
+        }));
+        showSheet(sheet);
+    }
+
+    private String activityCourseLabel(String name) {
+        return "选择课程 · "+(name.isEmpty()?"全部课程":name);
+    }
+
+    private java.util.Map<String,String> activityCourseNames(List<ActivityFeed.Entry> cached,int type) {
+        java.util.Map<String,String> names=new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for(ActivityFeed.Entry entry:cached) {
+            if(type!=0&&entry.type()!=type) continue;
+            String name=ActivityFeed.label(entry.raw,"courseName","");
+            if(!name.isEmpty()) names.putIfAbsent(name,name);
+        }
+        return names;
+    }
+
+    private Dialog showActivityCoursePicker(java.util.Map<String,String> names,String selected,
+            java.util.function.Consumer<String> choose) {
+        Sheet picker=createSheet("选择课程",names.isEmpty()?"本机暂无可选课程":"选择后返回筛选卡片。");
+        List<String> options=new ArrayList<>();
+        options.add("");
+        options.addAll(names.values());
+        for(String name:options) {
+            String label=name.isEmpty()?"全部课程":name;
+            boolean checked=name.equalsIgnoreCase(selected);
+            Button option=button(label,checked,() -> {
+                picker.dialog.dismiss();
+                choose.accept(name);
+            });
+            option.setMinimumHeight(dp(44));
+            option.setSelected(checked);
+            if(checked) option.setContentDescription(label+"，已选中");
+            picker.panel.addView(option,lp(-1,-2));
+            gap(picker.panel,8);
+        }
+        showSheet(picker);
+        return picker.dialog;
+    }
+
+    private void applyActivityFilter(String course,int type) {
+        activityCourseFilter=course;
+        activityTypeFilter=type;
+        bindFeed();
+        if(feedScroll!=null) feedScroll.scrollTo(0,0);
+    }
     private int visibleActivityCount() { return activityFeed==null?0:Math.min(feedVisibleLimit,activityFeed.entries.size()); }
     private final java.util.Map<String,LessonReport> reports=new java.util.LinkedHashMap<>();
     private final java.util.Set<String> attendanceLoading=new java.util.HashSet<>();
@@ -312,6 +512,7 @@ public class MainActivity extends Activity {
     private int readerIndex() { return dynamicView==HISTORY_READER?historyPage:page; }
     private String time(long millis) { return millis>0?android.text.format.DateFormat.format("MM月dd日 HH:mm",millis).toString():"未提供"; }
     private void showFeed() {
+        if(dynamicCredentialLookup!=null) dynamicCredentialLookup.set(true); pendingLiveReportId=null;
         dynamicView=FEED; historyRevision++; loadingHistory=false; render();
         if(user!=null&&activityFeed==null&&!loadingActivities) loadActivities();
     }
@@ -322,11 +523,11 @@ public class MainActivity extends Activity {
         if(dynamicView==DETAIL&&selectedActivity!=null) { activityDetailPage(); return; }
         heading("YOUR CLASSROOM JOURNAL","课堂动态","回顾最近的课堂，把上课与签到记录留在一起。");
         if(user==null) { emptyCard("登录后查看课堂动态","扫码连接账号，查看最近上课、签到与课件。","扫码登录",this::openLogin); return; }
-        if(hasLesson()) {
-            LinearLayout current=compactCard(),top=row(); TextView name=text(currentCourse.isEmpty()?"正在进行的课堂":currentCourse,16,INK,true); top.addView(name,new LinearLayout.LayoutParams(0,-2,1)); top.addView(pill("当前课堂",GREEN,PALE)); current.addView(top); gap(current,6); current.addView(text("入课已确认",12,MUTED,false)); TextView open=text("查看当前课件",12,GREEN,true); open.setGravity(Gravity.END|Gravity.CENTER_VERTICAL); open.setMinHeight(dp(44)); open.setOnClickListener(v -> { dynamicView=LIVE_READER; render(); }); current.addView(open,lp(-1,-2)); addCard(current);
-        }
         LinearLayout section=row(); section.addView(text("最近课堂",18,INK,true),new LinearLayout.LayoutParams(0,-2,1));
         feedRefresh=text("刷新动态",12,GREEN,true); feedRefresh.setGravity(Gravity.CENTER); feedRefresh.setPadding(dp(14),dp(12),0,dp(12)); feedRefresh.setMinHeight(dp(44)); feedRefresh.setOnClickListener(v -> loadActivities()); section.addView(feedRefresh); body.addView(section); gap(body,12);
+        feedFilter=button("筛选动态",false,this::openActivityFilters);
+        feedFilter.setMinimumHeight(dp(44));
+        body.addView(feedFilter,lp(-1,-2)); gap(body,12);
         feedScroll=contentScroll; feedBody=body; feedAccount=accountEpoch; feedCards.clear();
         feedScroll.setFocusableInTouchMode(true); feedScroll.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS); feedScroll.requestFocus();
         feedWarning=column(); feedEmpty=column(); feedRows=column(); body.addView(feedWarning); body.addView(feedEmpty); body.addView(feedRows);
@@ -337,7 +538,7 @@ public class MainActivity extends Activity {
     private ScrollView feedScroll;
     private LinearLayout feedBody,feedRows,feedWarning,feedEmpty;
     private TextView feedRefresh,feedPageError,feedEnd,feedUpdated;
-    private Button feedMore;
+    private Button feedMore,feedFilter;
     private int feedAccount=-1;
     private final java.util.Map<String,FeedCard> feedCards=new java.util.LinkedHashMap<>();
     private String feedKey(ActivityFeed.Entry entry) { return entry.lessonId().isEmpty()?ActivityFeed.label(entry.raw,"id",entry.raw.toString()):"lesson:"+entry.lessonId(); }
@@ -350,8 +551,8 @@ public class MainActivity extends Activity {
         final LinearLayout view;
         final TextView kind,timestamp,course,title,teacher,attendance,checkin;
         FeedCard(ActivityFeed.Entry entry) {
-            this.entry=entry; view=compactCard(); LinearLayout top=row(); kind=pill("课堂记录",GREEN,PALE); top.addView(kind); timestamp=text("",11,MUTED,false); timestamp.setGravity(Gravity.END); top.addView(timestamp,new LinearLayout.LayoutParams(0,-2,1)); view.addView(top); gap(view,10);
-            course=text("",16,INK,true); course.setMaxLines(2); course.setEllipsize(android.text.TextUtils.TruncateAt.END); view.addView(course); gap(view,5); title=text("",12,INK,false); title.setMaxLines(2); title.setEllipsize(android.text.TextUtils.TruncateAt.END); view.addView(title); gap(view,5); teacher=text("",11,MUTED,false); view.addView(teacher); gap(view,10);
+            this.entry=entry; view=compactCard(); LinearLayout top=row(); kind=pill("课堂记录",GREEN,PALE); top.addView(kind); timestamp=text("",11,MUTED,false); timestamp.setGravity(Gravity.END); top.addView(timestamp,new LinearLayout.LayoutParams(0,-2,1)); view.addView(top); gap(view,8);
+            course=text("",16,INK,true); course.setMaxLines(2); course.setEllipsize(android.text.TextUtils.TruncateAt.END); view.addView(course); gap(view,5); title=text("",12,INK,false); title.setMaxLines(2); title.setEllipsize(android.text.TextUtils.TruncateAt.END); view.addView(title); gap(view,5); teacher=text("",11,MUTED,false); view.addView(teacher); gap(view,8);
             LinearLayout footer=row(),labels=column(); attendance=text("",12,MUTED,true); attendance.setSingleLine(true); attendance.setEllipsize(android.text.TextUtils.TruncateAt.END); labels.addView(attendance); gap(labels,3);
             checkin=text("",11,MUTED,false); checkin.setSingleLine(true); checkin.setEllipsize(android.text.TextUtils.TruncateAt.END); labels.addView(checkin);
             footer.addView(labels,new LinearLayout.LayoutParams(0,-2,1)); footer.addView(text("查看详情",12,GREEN,true)); view.addView(footer);
@@ -371,18 +572,28 @@ public class MainActivity extends Activity {
         setLabel(feedRefresh,loadingActivities?"刷新中…":"刷新动态");
         feedWarning.removeAllViews();
         if(activityError!=null) {
-            LinearLayout warning=card(); warning.addView(text(activityFeed==null?"动态加载失败":"刷新未完成",15,INK,true)); gap(warning,8); warning.addView(text(activityError,12,MUTED,false)); gap(warning,16); warning.addView(button("重新刷新",false,this::loadActivities)); feedWarning.addView(warning,lp(-1,-2)); gap(feedWarning,16);
+            LinearLayout warning=card(); warning.addView(text(activityFeed==null?"动态加载失败":"刷新未完成",15,INK,true)); gap(warning,8); warning.addView(text(activityError,12,MUTED,false)); gap(warning,16); warning.addView(button("重新刷新",false,this::loadActivities)); feedWarning.addView(warning,lp(-1,-2)); gap(feedWarning,12);
         }
+        String filterLabel=activityTypeFilter==5?"作业":activityTypeFilter==14?"课堂":"全部类型";
+        if(!activityCourseFilter.isEmpty()) filterLabel+=" · "+activityCourseFilter;
+        setLabel(feedFilter,hasActivityFilter()?"筛选动态 · "+filterLabel:"筛选动态");
+        List<ActivityFeed.Entry> displayed=displayedActivities();
         feedEmpty.removeAllViews();
-        if(activityFeed==null||activityFeed.entries.isEmpty()) {
+        if(hasActivityFilter()&&activityFeed!=null&&displayed.isEmpty()) {
+            LinearLayout empty=card();
+            empty.addView(text("本机暂无符合条件的动态",16,INK,true));
+            gap(empty,8);
+            empty.addView(text("可修改筛选条件，或加载更多动态。",12,MUTED,false));
+            feedEmpty.addView(empty,lp(-1,-2)); gap(feedEmpty,12);
+        } else if(activityFeed==null||activityFeed.entries.isEmpty()) {
             if(activityFeed!=null||activityError==null) {
                 LinearLayout empty=card(); empty.addView(text(activityFeed==null?(loadingActivities?"正在同步最近课堂":"查看你的课堂足迹"):"最近还没有课堂动态",17,INK,true)); gap(empty,10); empty.addView(text("刷新后可查看最新的课堂记录。",12,MUTED,false));
                 if(!loadingActivities) { gap(empty,18); empty.addView(button("刷新动态",false,this::loadActivities)); }
-                feedEmpty.addView(empty,lp(-1,-2)); gap(feedEmpty,16);
+                feedEmpty.addView(empty,lp(-1,-2)); gap(feedEmpty,12);
             }
         }
         java.util.Set<String> keys=new java.util.LinkedHashSet<>(); int position=0;
-        if(activityFeed!=null) for(ActivityFeed.Entry entry:activityFeed.entries.subList(0,visibleActivityCount())) {
+        for(ActivityFeed.Entry entry:displayed) {
             String key=feedKey(entry); keys.add(key); FeedCard card=feedCards.get(key);
             if(card==null) { card=new FeedCard(entry); feedCards.put(key,card); } else card.bind(entry);
             if(feedRows.indexOfChild(card.view)!=position) {
@@ -392,12 +603,12 @@ public class MainActivity extends Activity {
             position++;
         }
         for(String key:new ArrayList<>(feedCards.keySet())) if(!keys.contains(key)) { feedRows.removeView(feedCards.remove(key).view); }
-        boolean more=activityFeed!=null&&(visibleActivityCount()<activityFeed.entries.size()||activityFeed.hasMore()); feedMore.setVisibility(more?View.VISIBLE:View.GONE); feedMore.setEnabled(!loadingMore&&!loadingActivities); setLabel(feedMore,loadingMore?"正在加载…":pageError==null?"加载更多动态":"重试加载更多");
+        boolean more=activityFeed!=null&&((!hasActivityFilter()&&visibleActivityCount()<activityFeed.entries.size())||activityFeed.hasMore()); feedMore.setVisibility(more?View.VISIBLE:View.GONE); feedMore.setEnabled(!loadingMore&&!loadingActivities); setLabel(feedMore,loadingMore?"正在加载…":pageError==null?"加载更多动态":"重试加载更多");
         feedPageError.setVisibility(pageError==null?View.GONE:View.VISIBLE); setLabel(feedPageError,pageError==null?"":"加载更多失败："+pageError);
         boolean ended=activityFeed!=null&&!activityFeed.entries.isEmpty()&&!more; feedEnd.setVisibility(ended?View.VISIBLE:View.GONE);
-        if(ended) setLabel(feedEnd,activityFeed.endReached?"已加载全部动态":activityFeed.stalled?"分页位置未更新，请刷新后重试":"服务未提供后续分页位置");
+        if(ended) setLabel(feedEnd,activityFeed.endReached?(hasActivityFilter()?"已筛选全部本机记录":"已加载全部动态"):activityFeed.stalled?"分页位置未更新，请刷新后重试":"服务未提供后续分页位置");
         feedUpdated.setVisibility(activityUpdated>0?View.VISIBLE:View.GONE);
-        if(activityUpdated>0) setLabel(feedUpdated,"已显示 "+visibleActivityCount()+" 条 · 更新于 "+android.text.format.DateFormat.format("HH:mm",activityUpdated));
+        if(activityUpdated>0) setLabel(feedUpdated,"已显示 "+displayed.size()+" 条 · 更新于 "+android.text.format.DateFormat.format("HH:mm",activityUpdated));
     }
     private FeedStore activityStore;
     private final ExecutorService feedIo=Executors.newSingleThreadExecutor();
@@ -484,7 +695,7 @@ public class MainActivity extends Activity {
     private void loadMoreActivities() {
         if(user==null||api==null||api.isClosed()) { openLogin(); return; }
         if(loadingMore||loadingActivities||activityFeed==null) return;
-        if(visibleActivityCount()<activityFeed.entries.size()) { feedVisibleLimit=Integer.MAX_VALUE; pageError=null; render(); fetchNeededReports(); return; }
+        if(!hasActivityFilter()&&visibleActivityCount()<activityFeed.entries.size()) { feedVisibleLimit=Integer.MAX_VALUE; pageError=null; render(); fetchNeededReports(); return; }
         if(!activityFeed.hasMore()) return;
         feedVisibleLimit=Integer.MAX_VALUE;
         ActivityFeed previous=activityFeed; FeedTimeline timeline=activityTimeline==null?new FeedTimeline(previous):activityTimeline; int revision=activityRevision; RainApi owner=api;
@@ -510,11 +721,29 @@ public class MainActivity extends Activity {
     private void updateSelectedActivityReport(String id) {
         if(selectedActivity!=null&&id.equals(selectedActivity.lessonId())) { selectedReport=reports.get(id); if(id.equals(waitingActivityReport)) { waitingActivityReport=null; loadingReport=false; } if(tab==1&&dynamicView==DETAIL) render(); }
         if(tab==1&&dynamicView==FEED) render();
+        if(id.equals(pendingLiveReportId)&&tab==1&&dynamicView==DETAIL&&selectedActivity!=null&&id.equals(selectedActivity.lessonId())&&!loadingReport) { pendingLiveReportId=null; if(liveActivityEntry(selectedActivity)!=null) openActivity(selectedActivity); }
+    }
+    private CourseCatalog.Entry liveActivityEntry(ActivityFeed.Entry entry) {
+        if(catalog!=null) for(CourseCatalog.Entry course:catalog.entries(false)) if(course.live!=null&&entry.lessonId().equals(course.live.optString("lessonId"))) return course;
+        LessonReport report=reports.get(entry.lessonId()); if((api!=null&&entry.lessonId().equals(api.lesson())&&(report==null||!report.ended()))||(report!=null&&report.info!=null&&report.infoError==null&&report.start()>0&&report.start()<=System.currentTimeMillis()&&!report.ended())) try { return new CourseCatalog.Entry(RainApi.object("course_name",entry.course()),RainApi.object("lessonId",entry.lessonId())); } catch(Exception ignored) {}
+        return null;
     }
     private void openActivity(ActivityFeed.Entry entry) {
         if(user==null||api==null||api.isClosed()) { openLogin(); return; }
         if(entry.lessonId().isEmpty()) { toast("当前只支持课堂记录的课程信息和课件"); return; }
-        selectedActivity=entry; selectedReport=reports.get(entry.lessonId()); historyPresentation=null; historySummary=null; historyError=null; historyRevision++; loadingHistory=false; dynamicView=DETAIL; loadActivityReport(false);
+        if(accountOperationBlocked()) { toast("请先完成当前任务"); return; }
+        if(dynamicCredentialLookup!=null) dynamicCredentialLookup.set(true);
+        selectedActivity=entry; selectedReport=reports.get(entry.lessonId()); historyPresentation=null; historySummary=null; historyError=null; int revision=++historyRevision; loadingHistory=false; dynamicView=DETAIL;
+        CourseCatalog.Entry live=liveActivityEntry(entry);
+        if(live==null) { pendingLiveReportId=entry.lessonId(); loadActivityReport(false); return; }
+        pendingLiveReportId=null;
+        RainApi owner=api;
+        if(entry.lessonId().equals(owner.lesson())) { showLiveClass(live,false); if(presentation==null) connectClass(); return; }
+        java.util.concurrent.atomic.AtomicBoolean cancelled=new java.util.concurrent.atomic.AtomicBoolean(); dynamicCredentialLookup=cancelled; render();
+        work(() -> owner.restoreLesson(entry.lessonId(),cancelled::get),restored -> {
+            if(cancelled.get()||revision!=historyRevision||selectedActivity!=entry||api!=owner) return;
+            dynamicCredentialLookup=null; if(restored) showLiveClass(live,true); else loadActivityReport(false);
+        },e -> { if(!cancelled.get()&&revision==historyRevision&&selectedActivity==entry&&api==owner) { dynamicCredentialLookup=null; loadActivityReport(false); } });
     }
     private void loadActivityReport(boolean refresh) {
         if(selectedActivity==null) return; final String id=selectedActivity.lessonId();
@@ -545,6 +774,7 @@ public class MainActivity extends Activity {
         LinearLayout details=compactCard(); detailLine(details,"任课教师",ActivityFeed.label(info,"teacherName",entry.teacher())); detailLine(details,"上课时间",report!=null&&report.start()>0?time(report.start()):"尚未取得课堂时间"); detailLine(details,"下课时间",report!=null&&report.end()>0?time(report.end()):"未提供");
         if(report!=null&&report.infoError!=null) details.addView(text("课堂信息暂未更新："+report.infoError,11,MUTED,false)); addCard(details);
         attendanceCard(report);
+        CourseCatalog.Entry live=liveActivityEntry(entry); if(live!=null) { body.addView(button("进入实时课堂",true,() -> confirmCheckin(live))); gap(body,10); }
         section("课堂课件",null,null); JSONArray decks=report==null?new JSONArray():report.presentations();
         if(decks.length()==0) emptyCard(loadingReport?"正在读取课件信息":"暂未取得可查看的课件",loadingReport?"正在获取这堂课的课堂报告。":"可刷新记录；部分课堂可能没有展示课件。",loadingReport?null:"刷新记录",() -> loadActivityReport(true));
         for(int i=0;i<decks.length();i++) {
@@ -553,6 +783,7 @@ public class MainActivity extends Activity {
         }
         if(historyError!=null) { body.addView(text("课件加载失败："+historyError,12,0xffa35445,false)); gap(body,16); }
     }
+
     private void attendanceCard(LessonReport report) {
         LinearLayout check=column(); check.setPadding(dp(16),dp(14),dp(16),dp(14)); check.setBackground(bg(WHITE,16,LINE));
         LinearLayout top=row(); top.addView(text("签到记录",14,INK,true),new LinearLayout.LayoutParams(0,-2,1));
@@ -587,7 +818,7 @@ public class MainActivity extends Activity {
         if(!historical) { LinearLayout connect=row(); connectionLabel=text(connection,11,MUTED,false); connect.addView(connectionLabel,new LinearLayout.LayoutParams(0,-2,1)); TextView reconnect=text("重新连接",12,GREEN,true); reconnect.setPadding(dp(12),dp(12),0,dp(12)); reconnect.setMinHeight(dp(44)); reconnect.setOnClickListener(v -> connectClass()); connect.addView(reconnect); body.addView(connect); gap(body,8); }
         LinearLayout reader=card();
         reader.addView(text(shown==null?"等待老师展示课件":shown.optString("title","未命名课件"),18,INK,true)); gap(reader,16);
-        LinearLayout opts=row(); follow=null; if(!historical) { follow=new CheckBox(this); follow.setText("跟随教师翻页"); follow.setTextSize(12); follow.setTextColor(MUTED); follow.setButtonTintList(android.content.res.ColorStateList.valueOf(GREEN)); follow.setChecked(prefs.getBoolean("follow",true)); follow.setPadding(0,0,0,0); follow.setMinHeight(dp(44)); follow.setOnCheckedChangeListener((b,value) -> { prefs.edit().putBoolean("follow",value).apply(); if(value&&api!=null) showPage(api.livePage()-1,false); }); opts.addView(follow,new LinearLayout.LayoutParams(0,dp(44),1)); } else { TextView count=text(shown==null?"原版课件":shown.optJSONArray("slides").length()+" 页 · 原版课件",11,MUTED,false); opts.addView(count,new LinearLayout.LayoutParams(0,-2,1)); }
+        LinearLayout opts=row(); follow=null; if(!historical) { follow=new CheckBox(this); follow.setText("跟随教师翻页"); follow.setTextSize(12); follow.setTextColor(MUTED); follow.setButtonTintList(android.content.res.ColorStateList.valueOf(GREEN)); follow.setChecked(prefs.getBoolean("follow",true)); follow.setPadding(0,0,0,0); follow.setMinHeight(dp(44)); follow.setOnCheckedChangeListener((b,value) -> { prefs.edit().putBoolean("follow",value).apply(); if(value&&api!=null) { if(api.isClassroomConnected()) showPage(api.livePage()-1,false); else connectClass(); } }); opts.addView(follow,new LinearLayout.LayoutParams(0,dp(44),1)); } else { TextView count=text(shown==null?"原版课件":shown.optJSONArray("slides").length()+" 页 · 原版课件",11,MUTED,false); opts.addView(count,new LinearLayout.LayoutParams(0,-2,1)); }
         TextView refresh=text("刷新课件",12,GREEN,true); refresh.setGravity(Gravity.CENTER); refresh.setMinHeight(dp(44)); refresh.setPadding(dp(12),0,0,0); refresh.setOnClickListener(v -> { if(historical) loadHistoryPresentation(historySummary,true); else fetchPresentation(true); }); opts.addView(refresh); reader.addView(opts); gap(reader,8);
         FrameLayout imageFrame=new FrameLayout(this); imageFrame.setBackground(bg(PALE,12,0)); slideImage=new ImageView(this); slideImage.setScaleType(ImageView.ScaleType.FIT_CENTER); slideImage.setContentDescription("课件页面，点击全屏查看"); imageFrame.addView(slideImage,new FrameLayout.LayoutParams(-1,-1));
         int available=Math.min(getResources().getDisplayMetrics().widthPixels,dp(720))-dp(80); reader.addView(imageFrame,lp(-1,Math.max(130,Math.round(available/getResources().getDisplayMetrics().density*9/16)))); slideImage.setOnClickListener(v -> fullscreen()); slideImage.setOnLongClickListener(v -> { imageOptions(); return true; });
@@ -597,22 +828,51 @@ public class MainActivity extends Activity {
         gap(reader,16); reader.addView(button("下载课件",true,this::downloadOptions)); addCard(reader);
         if(shown!=null) showPage(readerIndex(),false);
         if(historical) { if(historyError!=null) body.addView(text(historyError,12,0xffa35445,false)); return; }
-        LinearLayout check=card(); check.addView(text("课堂签到",17,INK,true)); gap(check,10); check.addView(text("入课已确认 · 位置签到状态需单独查询",12,MUTED,false)); gap(check,18); check.addView(button("查看位置签到状态",false,this::checkLocation)); addCard(check);
+        quizEntry=button("课堂答题",true,this::openClassroomQuiz); body.addView(quizEntry); updateQuizEntry(); gap(body,10);
+        body.addView(button("查看位置签到状态",false,this::checkLocation)); gap(body,16);
+        SyncSettings sync=syncSettings();if(sync!=null&&sync.available()){body.addView(new SyncControls(this,sync,SyncSettings.CHECKIN,()->{if(sync.enabled(SyncSettings.CHECKIN)&&hasLesson()&&!accountOperationBlocked())startOtherCheckins(api.lesson(),sync.selected(SyncSettings.CHECKIN));}));gap(body,10);}
     }
+    private void updateQuizEntry() { if(quizEntry!=null) quizEntry.setText(lessonQuiz==null||lessonQuiz.all().isEmpty()?"课堂答题":"课堂答题（"+lessonQuiz.all().size()+"）"); }
+    private LessonQuiz ensureQuiz() {
+        if(api==null||api.lesson()==null) return null;
+        if(lessonQuiz==null||!api.lesson().equals(lessonQuiz.lesson)) { closeQuiz(); lessonQuiz=new LessonQuiz(api.lesson(),System::currentTimeMillis,android.os.SystemClock::elapsedRealtime); }
+        return lessonQuiz;
+    }
+    private java.util.function.Consumer<List<Uri>> pendingQuizImages;
+    private static final int PICK_QUIZ_IMAGES=3971;
+    private void pickQuizImages(java.util.function.Consumer<List<Uri>> done){pendingQuizImages=done;Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT);pick.setType("image/*");pick.addCategory(Intent.CATEGORY_OPENABLE);pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);pick.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);try{startActivityForResult(pick,PICK_QUIZ_IMAGES);}catch(Exception e){pendingQuizImages=null;toast("未找到系统图片选择器");}}
+    private void closeQuiz() {pendingQuizImages=null; if(quizDialog!=null) quizDialog.close(); quizDialog=null; }
+    private void openClassroomQuiz() {
+        if(!hasLesson()) { toast("请先进入课堂"); return; } if(quizDialog!=null&&quizDialog.showing()) return;
+        RainApi owner=api; int epoch=accountEpoch; LessonQuiz quiz=ensureQuiz(); if(quiz==null) return;
+        try { if(presentation!=null) quiz.deck(presentation.optString("id"),presentation); } catch(Exception e) { toast(error(e)); }
+        if(quiz.all().isEmpty()){toast("当前课堂未收到任何题目");return;}
+        String initial=""; JSONArray slides=presentation==null?null:presentation.optJSONArray("slides"); JSONObject slide=slides==null?null:slides.optJSONObject(page); if(slide!=null) initial=LessonQuiz.id(slide.optJSONObject("problem"),"problemId");
+        quizDialog=new ClassroomQuizDialog(this,owner,quiz,workers,()->!isDestroyed()&&!isFinishing()&&api==owner&&!owner.isClosed()&&accountEpoch==epoch&&lessonQuiz==quiz&&quiz.lesson.equals(owner.lesson())); quizDialog.setAiFactory(this::createAiClient);quizDialog.setImagePicker(this::pickQuizImages); quizDialog.setOtherAccounts(new MultiAccountAnswers(accounts,prefs.getInt("service",0),AccountStore.key(prefs.getInt("service",0),user.optString("user_id")),this::createSavedAccountClient)); quizDialog.show(initial);
+    }
+    private boolean classroomRetryEligible() { return foreground&&!isDestroyed()&&!isFinishing()&&tab==1&&dynamicView==LIVE_READER&&!joining&&!classroomFinished&&api!=null&&!api.isClosed()&&api.lesson()!=null; }
+    private void stopClassroomRetry() { ui.removeCallbacks(classroomRetry); classroomRetryScheduled=false; }
+    private void updateClassroomRetry() { if(!classroomRetryEligible()) { stopClassroomRetry(); return; } if(!classroomRetryScheduled) { classroomRetryScheduled=true; ui.postDelayed(classroomRetry,5000); } }
+    private final Runnable classroomRetry=()-> { classroomRetryScheduled=false; if(!classroomRetryEligible()) return; if(!locationSubmitting&&!api.isClassroomConnected()&&!api.isClassroomConnecting()) connectClass(); updateClassroomRetry(); };
+    protected AiClient createAiClient(AiConfig config,String userAgent) { return new AiClient(config,userAgent); }
+    private void openAiSettings() { if(aiSettingsDialog!=null) aiSettingsDialog.close(); aiSettingsDialog=new AiSettingsDialog(this,new AiSettings(this),workers,()->{ if(tab==2&&!isDestroyed()) render(); }); aiSettingsDialog.show(); }
     private void connectClass() {
-        if(api==null||api.lesson()==null) return; RainApi a=api; int epoch=accountEpoch,lesson=lessonEpoch;
+        if(api==null||api.isClosed()||api.lesson()==null||api.isClassroomConnecting()||classroomFinished) return; RainApi a=api; int epoch=accountEpoch,lesson=lessonEpoch,attempt=++classroomConnectionRevision;
+        connection="正在连接课堂…"; if(connectionLabel!=null&&tab==1&&dynamicView==LIVE_READER) connectionLabel.setText(connection);
         try { a.connect(e -> ui.post(() -> {
-            if(isDestroyed()||epoch!=accountEpoch||api!=a||lesson!=lessonEpoch||joining) return;
+            if(isDestroyed()||epoch!=accountEpoch||api!=a||lesson!=lessonEpoch||attempt!=classroomConnectionRevision||joining) return;
             String op=e.optString("op");
-            if(op.equals("connection")) { String state=e.optString("state"); connection=state.equals("credentials-expired")?"课堂凭证已失效，请返回首页重新进入":state.equals("connected")?"●  课堂已连接":state.equals("closed")?"连接已断开，点击重新连接":"连接失败，点击重新连接"; }
+            LessonQuiz quiz=ensureQuiz(); if(quiz!=null) { boolean changed=quiz.ingest(e); updateQuizEntry(); if(quizDialog!=null) quizDialog.changed(); if(changed&&op.equals("unlockproblem")&&(quizDialog==null||!quizDialog.showing())) toast("老师已开放课堂题目，可在课堂答题中作答"); }
+            if(op.equals("connection")) { String state=e.optString("state"); connection=state.equals("credentials-expired")?"课堂凭证已失效，请返回首页重新进入":state.equals("connected")?"●  课堂已连接":state.equals("closed")?"连接已断开，将每 5 秒重试":"连接失败，将每 5 秒重试"; }
             else connection=e.optBoolean("finished")?"本次课堂已结束 · 课件仍可阅读":"●  课堂已连接 · 实时更新中";
+            if(e.optBoolean("finished")) classroomFinished=true; updateClassroomRetry();
             if(connectionLabel!=null&&tab==1&&dynamicView==LIVE_READER) connectionLabel.setText(connection);
             String id=e.optString("presentationId");
             if(!id.isEmpty()&&(presentation==null||!id.equals(presentation.optString("id"))||op.equals("showpresentation"))) fetchPresentation(false);
             else if(presentation!=null&&e.has("slide")&&prefs.getBoolean("follow",true)&&tab==1&&dynamicView==LIVE_READER) showPage(e.optInt("slide",1)-1,false);
             if(op.equals("locationcheckinext")) { cancelLocationFlow(); toast("老师已开启位置签到，可在课堂签到卡片确认签到"); }
             if(op.equals("locationcheckinend")||e.optBoolean("finished")) { cancelLocationFlow(); if(op.equals("locationcheckinend")) toast("本轮位置签到已结束"); }
-        })); } catch(Exception e) { toast(error(e)); }
+        })); updateClassroomRetry(); } catch(Exception e) { connection=error(e); if(connectionLabel!=null&&tab==1&&dynamicView==LIVE_READER) connectionLabel.setText(connection); updateClassroomRetry(); }
     }
     private void fetchPresentation(boolean notify) {
         if(!hasLesson()) { toast("请先签到进入课堂"); return; }
@@ -620,7 +880,7 @@ public class MainActivity extends Activity {
         work(a::fetchPresentation,p -> {
             if(revision!=lessonEpoch) return; fetchingPpt=false; if(!lesson.equals(a.lesson())) return;
             if(!p.optString("id").equals(a.presentation())) { fetchPresentation(false); return; }
-            boolean changed=presentation==null||!presentation.optString("id").equals(p.optString("id")); presentation=p; bitmaps.evictAll();
+            boolean changed=presentation==null||!presentation.optString("id").equals(p.optString("id")); presentation=p; LessonQuiz quiz=ensureQuiz(); if(quiz!=null) quiz.deck(p.optString("id"),p); if(quizDialog!=null) quizDialog.changed(); bitmaps.evictAll();
             if(changed&&prefs.getBoolean("follow",true)) page=a.livePage()-1;
             if(tab==1&&dynamicView==LIVE_READER) render(); if(notify) toast("课件已刷新");
         },e -> { if(revision!=lessonEpoch) return; fetchingPpt=false; if(notify) toast(error(e)); else { connection=error(e); if(connectionLabel!=null&&tab==1&&dynamicView==LIVE_READER) connectionLabel.setText(connection); } });
@@ -647,15 +907,126 @@ public class MainActivity extends Activity {
         if(slides!=null&&next>=0&&next<slides.length()) showPage(next,true);
     }
     private String accountInitial() { String name=user==null?"雨":user.optString("name","同学"); return name.isEmpty()?"同":name.substring(0,1); }
+    private void accountSection(String title) { body.addView(text(title,16,INK,true)); gap(body,8); }
+    private void addAccountCard(LinearLayout card) { body.addView(card,lp(-1,-2)); gap(body,12); }
     private void accountPage() {
-        heading("YOUR OWN LEARNING SPACE","学习，自有节奏","账号与课堂信息保存在本机，你的手机直接连接雨课堂。");
-        LinearLayout profile=card(); LinearLayout top=row(); TextView avatar=text(user==null?"雨":accountInitial(),22,GREEN,true); avatar.setGravity(Gravity.CENTER); avatar.setBackground(bg(PALE,18,0)); top.addView(avatar,lp(56,56)); LinearLayout info=column(); info.setPadding(dp(16),0,0,0); info.addView(text(user==null?"尚未登录":user.optString("name","同学"),20,INK,true)); gap(info,8); info.addView(text(user==null?"连接你的雨课堂账号":user.optString("school","雨课堂账号"),12,MUTED,false)); top.addView(info,new LinearLayout.LayoutParams(0,-2,1)); profile.addView(top); gap(profile,24); profile.addView(button(user==null?"登录账号":"退出当前账号",user==null,user==null?this::openLogin:this::logout)); addCard(profile);
-        section("连接方式",null,null); LinearLayout local=card(); local.addView(text("手机直连官方服务",17,INK,true)); gap(local,10); local.addView(text("HTTP 与课堂 WebSocket 均从手机发出。无需配置服务器，不启动本地 HTTP 服务，不经过开发者中继。",13,MUTED,false)); gap(local,16); local.addView(pill(RainApi.SERVICES[prefs.getInt("service",0)],GREEN,PALE)); addCard(local);
-        section("请求设置",null,null); LinearLayout ua=compactCard(),uaTop=row(); uaTop.addView(text("User-Agent",15,INK,true),new LinearLayout.LayoutParams(0,-2,1)); uaTop.addView(pill(UserAgent.isCustom(prefs)?"自定义":"设备默认",GREEN,PALE)); ua.addView(uaTop); gap(ua,10); TextView preview=text(UserAgent.current(prefs),11,MUTED,false); preview.setMaxLines(3); preview.setEllipsize(android.text.TextUtils.TruncateAt.END); ua.addView(preview); gap(ua,14); ua.addView(button("修改 User-Agent",false,this::userAgentSettings)); addCard(ua);
-        section("关于应用",null,null); LinearLayout about=compactCard(); about.addView(text("作者 FirmPluvia",14,INK,true)); gap(about,12); about.addView(button("项目主页",false,() -> openWeb(PROJECT_URL))); addCard(about);
-        section("诊断日志",null,null); LinearLayout log=compactCard(); log.addView(text("记录登录阶段、耗时与错误码，不记录密码、验证码、token 或 Cookie。",12,MUTED,false)); gap(log,12); log.addView(button("导出今日日志",false,this::exportDiagnostics)); addCard(log);
-        section("使用小提示",null,null); LinearLayout guide=card(); guideRow(guide,"01","连接账号","选择雨课堂版本，支持二维码、手机号 / 邮箱密码，以及短信验证码登录。"); guideRow(guide,"02","确认签到","点击课程优先使用本地凭证；未找到时确认签到入课，位置签到单独查询。"); guideRow(guide,"03","保存课件","支持本机生成图片版 PPTX 和图片 ZIP。"); addCard(guide);
-        gap(body,8); TextView foot=text("雨课堂助手 "+BuildConfig.VERSION_NAME,10,MUTED,false); foot.setGravity(Gravity.CENTER); body.addView(foot);
+        heading("YOUR OWN LEARNING SPACE","我的","账号与应用设置");
+        LinearLayout profile=compactCard(),top=row(); TextView avatar=text(user==null?"雨":accountInitial(),18,GREEN,true); avatar.setGravity(Gravity.CENTER); avatar.setBackground(bg(PALE,14,0)); top.addView(avatar,lp(40,40));
+        LinearLayout info=column(); info.setPadding(dp(12),0,0,0); info.addView(text(user==null?"尚未登录":user.optString("name","同学"),18,INK,true)); gap(info,4); TextView school=text(user==null?"连接你的雨课堂账号":user.optString("school","雨课堂账号"),11,MUTED,false); school.setSingleLine(true); school.setEllipsize(android.text.TextUtils.TruncateAt.END); info.addView(school); top.addView(info,new LinearLayout.LayoutParams(0,-2,1)); profile.addView(top); gap(profile,12);
+        LinearLayout actions=row(); actions.addView(button(user==null?"登录账号":"退出当前账号",user==null,user==null?this::openLogin:this::logout),new LinearLayout.LayoutParams(0,dp(44),1)); LinearLayout.LayoutParams accountParams=new LinearLayout.LayoutParams(0,dp(44),1); accountParams.leftMargin=dp(10); actions.addView(button("账号管理",false,this::openAccountManager),accountParams); profile.addView(actions); addAccountCard(profile);
+        accountSection("请求设置"); LinearLayout ua=compactCard(),uaRow=row(),uaNames=column(); uaNames.addView(text("User-Agent",14,INK,true)); gap(uaNames,4); TextView preview=text(UserAgent.deviceSummary(UserAgent.current(prefs)),11,MUTED,false); preview.setSingleLine(true); preview.setEllipsize(android.text.TextUtils.TruncateAt.END); uaNames.addView(preview); LinearLayout.LayoutParams uaNameParams=new LinearLayout.LayoutParams(0,-2,1); uaNameParams.rightMargin=dp(8); uaRow.addView(uaNames,uaNameParams); TextView editUa=accountAction("修改",this::userAgentSettings); editUa.setContentDescription("修改 User-Agent"); uaRow.addView(editUa,lp(104,44)); ua.addView(uaRow); addAccountCard(ua);
+        if(user!=null) { LinearLayout management=compactCard(),line=row(); line.addView(text("Cookie 管理",14,INK,true),new LinearLayout.LayoutParams(0,-2,1)); line.addView(accountAction("管理 Cookie",this::openCookieSettings),lp(104,44)); management.addView(line); addAccountCard(management); }
+        else { LinearLayout cookieLogin=compactCard(),line=row(); line.addView(text("使用 Cookie",14,INK,true),new LinearLayout.LayoutParams(0,-2,1)); line.addView(accountAction("Cookie 登录",this::openCookieLogin),lp(104,44)); cookieLogin.addView(line); addAccountCard(cookieLogin); }
+        LinearLayout aiCard=compactCard(),aiRow=row(),aiNames=column(); aiNames.addView(text("AI 答题",14,INK,true)); gap(aiNames,4); TextView aiSummary=text(new AiSettings(this).preview().summary(),11,MUTED,false); aiSummary.setSingleLine(true); aiSummary.setEllipsize(android.text.TextUtils.TruncateAt.END); aiNames.addView(aiSummary); aiRow.addView(aiNames,new LinearLayout.LayoutParams(0,-2,1)); aiRow.addView(accountAction("配置 AI",this::openAiSettings),lp(104,44)); aiCard.addView(aiRow); addAccountCard(aiCard);
+        SyncSettings sync=syncSettings();if(sync!=null&&sync.available()){LinearLayout syncCard=compactCard(),syncRow=row();syncRow.addView(text("同步请求",14,INK,true),new LinearLayout.LayoutParams(0,-2,1));syncRow.addView(accountAction("同步设置",this::openSyncSettings),lp(104,44));syncCard.addView(syncRow);addAccountCard(syncCard);}
+        accountSection("使用小提示"); LinearLayout guide=compactCard(); guideRow(guide,"01","连接账号","支持二维码、账号密码、短信及 Cookie 登录"); guideRow(guide,"02","确认签到与入课","点击查看课堂以签到入课或使用课堂ID/扫码签到入课"); guideRow(guide,"03","AI答题","配置AI答题的API接口与Key，随后可在答题时使用AI辅助分析"); guideRow(guide,"04","保存课件","支持图片版 PPTX、图片 ZIP 和单页保存"); addAccountCard(guide);
+        accountSection("关于应用"); LinearLayout about=compactCard(),aboutRow=row(); aboutRow.addView(text("作者 FirmPluvia",13,INK,true),new LinearLayout.LayoutParams(0,-2,1)); aboutRow.addView(accountAction("项目主页",() -> openWeb(PROJECT_URL)),lp(88,44)); about.addView(aboutRow); addAccountCard(about);
+        TextView foot=text("雨课堂助手 "+BuildConfig.VERSION_NAME,10,MUTED,false); foot.setGravity(Gravity.CENTER); body.addView(foot);
+    }
+    private SyncSettings syncSettings(){if(user==null)return null;int service=prefs.getInt("service",0);return new SyncSettings(this,accounts,service,AccountStore.key(service,user.optString("user_id")));}
+    private void openSyncSettings(){
+        SyncSettings sync=syncSettings();if(sync==null||!sync.available())return;Sheet sheet=createSheet("同步请求设置","仅同步同服务器的其他账号");SyncControls checkin=new SyncControls(this,sync,SyncSettings.CHECKIN,null),answer=new SyncControls(this,sync,SyncSettings.ANSWER,null);sheet.panel.addView(checkin);gap(sheet.panel,8);sheet.panel.addView(answer);gap(sheet.panel,12);CheckBox subjective=new CheckBox(this);subjective.setText("主观题分别编辑答案");subjective.setTextColor(INK);subjective.setTextSize(13);subjective.setButtonTintList(ColorStateList.valueOf(GREEN));subjective.setChecked(sync.independentSubjective());subjective.setMinHeight(dp(44));subjective.setOnCheckedChangeListener((v,value)->{sync.independentSubjective(value);});sheet.panel.addView(subjective);gap(sheet.panel,8);CheckBox feedback=new CheckBox(this);feedback.setText("同步签到与答题结果使用卡片提示");feedback.setTextSize(13);feedback.setTextColor(INK);feedback.setMinHeight(dp(44));feedback.setButtonTintList(ColorStateList.valueOf(GREEN));feedback.setTag("sync-result-cards");feedback.setChecked(sync.resultCards());feedback.setOnCheckedChangeListener((v,value)->sync.resultCards(value));sheet.panel.addView(feedback);sheet.dialog.setOnDismissListener(d->{if(tab==2&&!isDestroyed())render();});showSheet(sheet);
+    }
+    private boolean accountOperationBlocked() { return scanningLesson||resolvingLessonScan||switchingAccount||batchCheckin!=null||locationSyncJob!=null||joining||checkingCredentials||downloading||pendingFormat!=null||checkingLocation||locationSubmitting; }
+    private RainApi createSavedAccountClient(AccountStore.Account account) throws Exception {
+        AccountStore.Account latest=accounts.get(account.key); if(latest==null) throw new RainApi.Failure("该账号已移除，请重新选择",409); LoginCookies.Memory cookies=new LoginCookies.Memory(); cookies.write(latest.cookies); return configureApi(createLoginClient(latest.service,cookies));
+    }
+    private TextView accountAction(String label,Runnable action) {
+        TextView view=text(label,12,GREEN,true); view.setGravity(Gravity.CENTER); view.setMinHeight(dp(44)); view.setPadding(dp(8),0,dp(8),0); view.setFocusable(true); view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x142c5846),bg(PALE,10,0),bg(WHITE,10,0))); view.setOnClickListener(v -> action.run()); return view;
+    }
+    private void removeSavedAccount(AccountStore.Account account,boolean current) {
+        if(current) { logout(); return; } Sheet confirm=createSheet("移除保存的账号？",account.name+" · "+RainApi.SERVICES[account.service]); confirm.panel.addView(button("确认移除",true,() -> { try { accounts.remove(account.key); confirm.dialog.dismiss(); openAccountManager(); } catch(Exception e) { toast("无法移除账号，请重试"); } }));  showSheet(confirm);
+    }
+    private void openAccountManager() {
+        if(accountOperationBlocked()) { toast("请先完成当前任务"); return; }
+        List<AccountStore.Account> saved=accounts.list(); Sheet sheet=createSheet("账号管理","已保存 "+saved.size()+" 个账号");
+        if(saved.isEmpty()) { sheet.panel.addView(text("添加账号后，可在这里切换登录。",13,MUTED,false)); gap(sheet.panel,16); }
+        for(AccountStore.Account account:saved) {
+            boolean current=user!=null&&account.key.equals(AccountStore.key(prefs.getInt("service",0),user.optString("user_id")));
+            LinearLayout item=row(); item.setPadding(dp(12),dp(10),dp(10),dp(10)); item.setBackground(bg(WHITE,14,LINE));
+            String initial=account.name.isEmpty()?"雨":account.name.substring(0,1); TextView avatar=text(initial,15,GREEN,true); avatar.setGravity(Gravity.CENTER); avatar.setBackground(bg(PALE,12,0)); LinearLayout.LayoutParams avatarParams=lp(32,32); avatarParams.rightMargin=dp(10); item.addView(avatar,avatarParams);
+            LinearLayout names=column(),title=row(); TextView name=text(account.name,14,INK,true); name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END); title.addView(name,new LinearLayout.LayoutParams(0,-2,1)); names.addView(title); gap(names,5); TextView server=text(RainApi.SERVICES[account.service],11,MUTED,false); server.setSingleLine(true); names.addView(server); LinearLayout.LayoutParams namesParams=new LinearLayout.LayoutParams(0,-2,1); namesParams.rightMargin=dp(8); item.addView(names,namesParams);
+            TextView change=accountAction(current?"当前":"切换",() -> { if(!current) { sheet.dialog.dismiss(); switchSavedAccount(account.key); } }); if(current) { change.setOnClickListener(null); change.setClickable(false); change.setFocusable(false); } item.addView(change,lp(48,44));
+            TextView remove=accountAction("移除",() -> { sheet.dialog.dismiss(); removeSavedAccount(account,current); }); remove.setTextColor(MUTED); LinearLayout.LayoutParams removeParams=lp(48,44); removeParams.leftMargin=dp(6); item.addView(remove,removeParams); sheet.panel.addView(item); gap(sheet.panel,8);
+        }
+        gap(sheet.panel,6); LinearLayout footer=row(); footer.addView(button("添加账号",true,() -> { sheet.dialog.dismiss(); beginAddAccount(); }),new LinearLayout.LayoutParams(0,dp(46),1)); sheet.panel.addView(footer); showSheet(sheet);
+    }
+    private void beginAddAccount() {
+        if(accountOperationBlocked()) { toast("请先完成当前任务"); return; }
+        try { if(user!=null&&api!=null&&!api.isClosed()) { String old=accounts.remember(prefs.getInt("service",0),user,api.cookieSnapshot()); accounts.active(old); addingAccountFrom=old; resetAccount(false); } openLogin(); } catch(Exception e) { toast("无法保存当前账号，请稍后重试"); }
+    }
+    private void maybeRestoreAddedAccount() {
+        ui.post(() -> { if(addingAccountFrom!=null&&user==null&&loginDialog==null&&cookieDialog==null&&!switchingAccount&&!isDestroyed()&&!isFinishing()) { String key=addingAccountFrom; addingAccountFrom=null; switchSavedAccount(key); } });
+    }
+    private void switchSavedAccount(String key) {
+        if(accountOperationBlocked()) { toast("请先完成当前任务"); return; }
+        AccountStore.Account saved=accounts.get(key); if(saved==null) { toast("该账号已移除"); return; }
+        if(user!=null&&key.equals(AccountStore.key(prefs.getInt("service",0),user.optString("user_id")))) return;
+        RainApi candidate; try { candidate=createSavedAccountClient(saved); } catch(Exception e) { toast("无法读取账号，请重新添加"); return; }
+        switchingAccount=true; Sheet sheet=createSheet("切换账号",saved.name+" · "+RainApi.SERVICES[saved.service]); TextView status=text("正在校验账号…",13,MUTED,false); sheet.panel.addView(status); gap(sheet.panel,18);  final boolean[] accepted={false},closed={false};
+        sheet.dialog.setOnDismissListener(d -> { closed[0]=true; switchingAccount=false; if(!accepted[0]) retire(candidate); }); showSheet(sheet);
+        work(() -> { JSONObject profile=candidate.profile(); if(!saved.uid.equals(profile.optString("user_id"))) throw new RainApi.Failure("账号身份已变更，请重新添加该账号",401); return profile; },profile -> {
+            if(closed[0]) { retire(candidate); return; } accepted[0]=true; prefs.edit().putInt("service",saved.service).apply(); resetAccount(false); retire(api);
+            try { candidate.configure(lessonCache.session()); candidate.promoteSession(vault.session()); loginSuccess(profile,candidate); }
+            catch(Exception e) { retire(candidate); toast("切换失败，请重新添加账号"); }
+        },e -> { retire(candidate); switchingAccount=false; if(!closed[0]) status.setText("切换失败："+error(e)); });
+    }
+    private void startOtherCheckins(String id,List<AccountStore.Account> selected) {
+        if(selected.isEmpty()||batchCheckin!=null||user==null) return;
+        int account=accountEpoch,service=prefs.getInt("service",0); String current=AccountStore.key(service,user.optString("user_id")); List<AccountStore.Account> targets=new ArrayList<>(); for(AccountStore.Account item:selected) if(item.service==service&&!item.key.equals(current)&&accounts.get(item.key)!=null) targets.add(item); if(targets.isEmpty()) return;
+        MultiAccountCheckin job=new MultiAccountCheckin(accounts,this::createSavedAccountClient); batchCheckin=job;
+        SyncSettings feedback=syncSettings();if(feedback!=null&&!feedback.resultCards()){
+            work(()->job.run(targets,service,id,(item,state)->{}),results->{if(batchCheckin==job)batchCheckin=null;if(account==accountEpoch&&!job.cancelled())toast(SyncFeedback.summary("签到",results,result->result.success));job.close();},e->{if(batchCheckin==job)batchCheckin=null;if(account==accountEpoch&&!job.cancelled())toast("本次同步签到未完成，请核对签到记录");job.close();});return;
+        }
+        Sheet sheet=createSheet("其他账号签到入课","取消将停止后续账号，已提交的签到不会撤销。"); java.util.Map<String,TextView> labels=new java.util.LinkedHashMap<>();
+        for(AccountStore.Account item:targets) { LinearLayout card=compactCard(); card.addView(text(item.name,15,INK,true)); gap(card,8); TextView state=text("等待处理",12,MUTED,false); card.addView(state); labels.put(item.key,state); sheet.panel.addView(card); gap(sheet.panel,10); }
+        View close=sheet.close; sheet.dialog.setOnDismissListener(d -> { job.close(); if(batchCheckin==job) batchCheckin=null; }); showSheet(sheet);
+        work(() -> job.run(targets,service,id,(item,state) -> ui.post(() -> { if(account==accountEpoch&&sheet.dialog.isShowing()&&batchCheckin==job) labels.get(item.key).setText(state); })),results -> { if(batchCheckin==job) batchCheckin=null; if(sheet.dialog.isShowing()) close.setContentDescription("关闭其他账号签到入课"); },e -> { if(batchCheckin==job) batchCheckin=null; if(sheet.dialog.isShowing()) { close.setContentDescription("关闭其他账号签到入课"); toast("处理已停止，请查看各账号结果"); } });
+    }
+    private void openCookieSettings() {
+        if(cookieDialog!=null&&cookieDialog.isShowing()) return;
+        if(user==null||api==null||api.isClosed()) { toast("请先登录账号，再管理 Cookie"); return; }
+        Sheet sheet=createSheet("管理 Cookie","当前账号的登录 Cookie，仅供查看和复制。"); cookieDialog=sheet.dialog;
+        sheet.panel.addView(pill(RainApi.SERVICES[prefs.getInt("service",0)],GREEN,PALE)); gap(sheet.panel,14);
+        android.widget.EditText input=loginField("当前 Cookie",false); input.setSingleLine(false); input.setMinLines(3); input.setMaxLines(6); input.setGravity(Gravity.TOP); input.setTextSize(12); input.setTypeface(Typeface.MONOSPACE); input.setKeyListener(null); input.setTextIsSelectable(true); input.setText(api.loginCookieHeader()); sheet.panel.addView(input,lp(-1,-2)); gap(sheet.panel,14);
+        TextView status=text("",12,MUTED,false); sheet.panel.addView(status); gap(sheet.panel,10);
+        sheet.panel.addView(button("复制 Cookie",true,() -> {
+            if(input.getText().length()==0) { status.setText("当前没有可复制的 Cookie"); return; }
+            android.content.ClipboardManager clipboard=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE); if(clipboard==null) { status.setText("无法访问剪贴板"); return; }
+            android.content.ClipData data=android.content.ClipData.newPlainText("雨课堂 Cookie",input.getText().toString()); if(android.os.Build.VERSION.SDK_INT>=33) { android.os.PersistableBundle extras=new android.os.PersistableBundle(); extras.putBoolean("android.content.extra.IS_SENSITIVE",true); data.getDescription().setExtras(extras); } clipboard.setPrimaryClip(data); status.setText("Cookie 已复制");
+        }));  sheet.dialog.setOnDismissListener(d -> { input.setText(""); if(cookieDialog==sheet.dialog) cookieDialog=null; }); showSheet(sheet);
+    }
+    private void openCookieLogin() {
+        if(cookieDialog!=null&&cookieDialog.isShowing()) return;
+        if(downloading||pendingFormat!=null||joining||checkingCredentials||checkingLocation||locationSubmitting) { toast("请先完成当前任务"); return; }
+        final int[] service={prefs.getInt("service",0)};
+        if(user!=null) { toast("请先在账号管理中添加账号，或退出当前账号"); return; }
+        Sheet sheet=createSheet("Cookie 登录","选择雨课堂版本，粘贴 Cookie 后登录。"); cookieDialog=sheet.dialog;
+        Button server=button(RainApi.SERVICES[service[0]],false,() -> {}); server.setContentDescription("Cookie 登录服务器"); sheet.panel.addView(server); gap(sheet.panel,14);
+        android.widget.EditText input=loginField("Cookie 内容",false); input.setSingleLine(false); input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE|android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS); input.setMinLines(4); input.setMaxLines(7); input.setGravity(Gravity.TOP); input.setTypeface(Typeface.MONOSPACE); input.setTextSize(12); sheet.panel.addView(input,lp(-1,-2)); gap(sheet.panel,10);
+        TextView status=text("",12,MUTED,false); sheet.panel.addView(status); gap(sheet.panel,14);
+        Button use=button("使用 Cookie 登录",true,() -> {}); use.setTag("cookie-login-action"); sheet.panel.addView(use);
+        class CookieFlow {
+            boolean closed,busy,transferring; RainApi client; Dialog picker;
+            void load() { input.setText(""); status.setText(""); }
+            void enabled(boolean value) { busy=!value; input.setEnabled(value); server.setEnabled(value); use.setEnabled(value); }
+            String value() { try { return LoginCookies.normalize(input.getText().toString()); } catch(IllegalArgumentException e) { status.setText(e.getMessage()); return null; } }
+            void login() {
+                if(busy||closed) return; if(user!=null) { use.setVisibility(View.GONE); return; } String value=value(); if(value==null) return;
+                try { client=configureApi(createLoginClient(service[0],new LoginCookies.Memory())); client.importLoginCookies(value); }
+                catch(Exception e) { retire(client); status.setText("无法创建 Cookie 登录会话，请检查内容后重试"); return; }
+                RainApi candidate=client; int selected=service[0]; enabled(false); status.setText("正在校验 Cookie…");
+                work(() -> { JSONObject profile=candidate.profile(); if(!candidate.hasCookies()) throw new RainApi.Failure("Cookie 已失效，请重新获取后登录",401); return profile; },profile -> {
+                    if(closed||client!=candidate||!sheet.dialog.isShowing()) { retire(candidate); return; }
+                    transferring=true; prefs.edit().putInt("service",selected).apply(); resetAccount(false); retire(api);
+                    try { candidate.configure(lessonCache.session()); candidate.promoteSession(vault.session()); loginSuccess(profile,candidate); }
+                    catch(Exception e) { retire(candidate); toast("无法保存登录会话，请重试 Cookie 登录"); }
+                },e -> { retire(candidate); if(!closed&&sheet.dialog.isShowing()) { enabled(true); status.setText("Cookie 校验失败："+error(e)); } });
+            }
+            void close() { closed=true; if(picker!=null) picker.dismiss(); if(!transferring) retire(client); input.setText(""); if(cookieDialog==sheet.dialog) cookieDialog=null; maybeRestoreAddedAccount(); }
+        }
+        CookieFlow flow=new CookieFlow(); flow.load(); use.setOnClickListener(v -> flow.login()); server.setOnClickListener(v -> { if(flow.busy) return; flow.picker=chooseService(service[0],selected -> { if(flow.closed||selected==service[0]) return; service[0]=selected; server.setText(RainApi.SERVICES[selected]); flow.load(); }); });
+        sheet.dialog.setOnDismissListener(d -> flow.close()); showSheet(sheet); if(sheet.dialog.getWindow()!=null) sheet.dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
     }
     private void userAgentSettings() {
         Sheet sheet=createSheet("自定义 User-Agent","设备默认值会读取 Android 版本、手机型号和 Build 编号。保存后对后续请求生效。");
@@ -664,25 +1035,30 @@ public class MainActivity extends Activity {
         sheet.panel.addView(button("保存 User-Agent",true,() -> {
             String value; try { value=UserAgent.validate(input.getText().toString()); } catch(IllegalArgumentException e) { errorLabel.setText(e.getMessage()); return; }
             prefs.edit().putString(UserAgent.KEY,value).apply(); if(api!=null&&!api.isClosed()) api.setUserAgent(value); sheet.dialog.dismiss(); if(tab==2) render(); toast("User-Agent 已保存");
-        })); gap(sheet.panel,10); sheet.panel.addView(button("恢复设备默认",false,() -> { prefs.edit().remove(UserAgent.KEY).apply(); if(api!=null&&!api.isClosed()) api.setUserAgent(UserAgent.deviceDefault()); sheet.dialog.dismiss(); if(tab==2) render(); toast("已恢复设备默认 User-Agent"); })); gap(sheet.panel,10); sheet.panel.addView(button("取消",false,sheet.dialog::dismiss)); showSheet(sheet); if(sheet.dialog.getWindow()!=null) sheet.dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        })); gap(sheet.panel,10); sheet.panel.addView(button("恢复设备默认",false,() -> { prefs.edit().remove(UserAgent.KEY).apply(); if(api!=null&&!api.isClosed()) api.setUserAgent(UserAgent.deviceDefault()); sheet.dialog.dismiss(); if(tab==2) render(); toast("已恢复设备默认 User-Agent"); }));  showSheet(sheet); if(sheet.dialog.getWindow()!=null) sheet.dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
     }
-    private void guideRow(LinearLayout parent,String number,String title,String description) { LinearLayout r=row(); r.setGravity(Gravity.TOP); r.addView(pill(number,GREEN,PALE)); LinearLayout details=column(); details.setPadding(dp(14),dp(2),0,0); details.addView(text(title,14,INK,true)); gap(details,8); details.addView(text(description,12,MUTED,false)); r.addView(details,new LinearLayout.LayoutParams(0,-2,1)); parent.addView(r); gap(parent,20); }
+    private void guideRow(LinearLayout parent,String number,String title,String description) { if(parent.getChildCount()>0) gap(parent,12); LinearLayout r=row(); r.setGravity(Gravity.TOP); r.addView(pill(number,GREEN,PALE)); LinearLayout details=column(); details.setPadding(dp(12),0,0,0); details.addView(text(title,13,INK,true)); gap(details,4); details.addView(text(description,11,MUTED,false)); r.addView(details,new LinearLayout.LayoutParams(0,-2,1)); parent.addView(r); }
     private void logout() {
         if(user==null) return;
-        Sheet sheet=createSheet("退出当前账号？","退出后需重新扫码登录，已保存的课件会保留。");
+        Sheet sheet=createSheet("退出当前账号？","退出后需重新登录，Cookie 将清除，课堂凭证和已下载课件会保留。");
         LinearLayout account=card(); account.addView(text(user.optString("name","当前账号"),18,INK,true)); gap(account,8); account.addView(text(RainApi.SERVICES[prefs.getInt("service",0)],12,MUTED,false)); sheet.panel.addView(account); gap(sheet.panel,22);
-        Button confirm=button("退出登录",true,() -> { sheet.dialog.dismiss(); resetAccount(); }); confirm.setBackground(bg(0xff9b5048,12,0)); sheet.panel.addView(confirm); gap(sheet.panel,10); sheet.panel.addView(button("继续使用",false,sheet.dialog::dismiss)); showSheet(sheet);
+        Button confirm=button("退出登录",true,() -> { sheet.dialog.dismiss(); resetAccount(); }); confirm.setBackground(bg(0xff9b5048,12,0)); sheet.panel.addView(confirm);  showSheet(sheet);
     }
     private void retire(RainApi client) {
         if(client==null) return; client.cancel();
         if(!workers.isShutdown()) workers.execute(client::close);
     }
-    private void resetAccount() {
+    private void resetAccount() { resetAccount(true); }
+    private void resetAccount(boolean explicitLogout) {
+        scanningLesson=false; resolvingLessonScan=false; scanOwner=null;
+        if(batchCheckin!=null) { batchCheckin.close(); batchCheckin=null; }
+        if(dynamicCredentialLookup!=null) dynamicCredentialLookup.set(true);
+        if(explicitLogout) { addingAccountFrom=null; cookieSettings.clear(); try { if(user!=null) accounts.remove(AccountStore.key(prefs.getInt("service",0),user.optString("user_id"))); } catch(Exception e) { toast("无法移除保存账号，请在账号管理中重试"); } accounts.active(""); }
         if(cancelEntryLookup!=null) cancelEntryLookup.run();
         // Invalidate callbacks and persisted authentication before waiting for any background cleanup.
-        accountEpoch++; loginEpoch++; lessonEpoch++; entryRevision++; checkingCredentials=false; busyCount=0;
-        RainApi previous=api; api=null; vault.clear(); lessonCache.revoke(); workers.execute(lessonCache::purgeRevoked); activityStore.revoke(); feedIo.execute(activityStore::purgeRevoked); ui.removeCallbacks(saveActivityCache); activitySession=null; activityScope=""; activityCacheLoaded=false; activityTimeline=null; waitingActivityReport=null; reportAt.clear(); deckAt.clear(); historyDecks.clear(); clearFeedViews();
-        user=null; presentation=null; catalog=null; activityFeed=null; feedVisibleLimit=10; selectedActivity=null; selectedReport=null; historyPresentation=null; historySummary=null; reports.clear(); attendanceLoading.clear(); activityRevision++; reportTickets.clear(); historyRevision++; activityUpdated=0; activityError=null; historyError=null; dynamicView=FEED; loadingActivities=false; loadingReport=false; loadingHistory=false; loadingMore=false; pageError=null; activeDownload=null; courseError=null; courseUpdated=0; currentCourse=""; connection="等待课堂连接";
+        if(aiSettingsDialog!=null) { aiSettingsDialog.close(); aiSettingsDialog=null; } stopClassroomRetry(); classroomFinished=false; classroomConnectionRevision++; closeQuiz(); lessonQuiz=null; accountEpoch++; loginEpoch++; lessonEpoch++; entryRevision++; checkingCredentials=false; busyCount=0;
+        RainApi previous=api; api=null; vault.clear(); lessonCache.revoke(); activityStore.revoke(); feedIo.execute(activityStore::purgeRevoked); ui.removeCallbacks(saveActivityCache); activitySession=null; activityScope=""; activityCacheLoaded=false; activityTimeline=null; waitingActivityReport=null; reportAt.clear(); deckAt.clear(); historyDecks.clear(); clearFeedViews();
+        user=null; presentation=null; catalog=null; activityFeed=null; activityCourseFilter=""; activityTypeFilter=0; feedVisibleLimit=10; selectedActivity=null; selectedReport=null; historyPresentation=null; historySummary=null; reports.clear(); attendanceLoading.clear(); activityRevision++; reportTickets.clear(); historyRevision++; activityUpdated=0; activityError=null; historyError=null; dynamicView=FEED; loadingActivities=false; loadingReport=false; loadingHistory=false; loadingMore=false; pageError=null; activeDownload=null; courseError=null; courseUpdated=0; currentCourse=""; connection="等待课堂连接";
         fetchingPpt=false; joining=false; loadingCourses=false; locationSubmitting=false; downloading=false; onlyLive=false; page=0; tab=0;
         if(imageJob!=null) imageJob.cancel(); imageJob=null; pendingImage=null;
         pendingFormat=null; exportPresentation=null; pendingExportApi=null; bitmaps.evictAll();
@@ -691,13 +1067,13 @@ public class MainActivity extends Activity {
         if(fullDialog!=null) fullDialog.dismiss(); fullImage=null; slideImage=null; follow=null; thumbStrip=null; connectionLabel=null;
         retire(previous);
         try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception e) { toast("已退出，请重新打开登录窗口"); }
-        render(); showLoading(); toast("已退出登录"); showPendingUpdate();
+        render(); showLoading(); if(explicitLogout) toast("已退出登录"); showPendingUpdate();
     }
     private boolean startupSessionRestored;
     private void restoreStartupSession() {
         if(startupSessionRestored||isFinishing()) return;
         startupSessionRestored=true;
-        if(api!=null&&api.hasCookies()&&user==null) { RainApi a=api; work(a::profile,p -> { user=p; render(); loadCourses(); if(tab==1&&dynamicView==FEED) loadActivities(); if(a.storageWarning()!=null) toast(a.storageWarning()); },e -> toast("会话恢复失败："+error(e))); }
+        if(api!=null&&api.hasCookies()&&user==null) { RainApi a=api; work(a::profile,p -> { rememberAccount(p,a); user=p; render(); loadCourses(); if(tab==1&&dynamicView==FEED) loadActivities(); if(a.storageWarning()!=null) toast(a.storageWarning()); },e -> toast("会话恢复失败："+error(e))); }
     }
     private void openWeb(String url) {
         if(url==null||url.isEmpty()) { toast("链接暂未配置"); return; }
@@ -715,7 +1091,7 @@ public class MainActivity extends Activity {
         if(checkingUpdate||exitingForUpdate||isDestroyed()||isFinishing()) return;
         checkingUpdate=true; if(updateChecker==null) updateChecker=createUpdateChecker(); String ua=UserAgent.current(prefs); UpdateChecker checker=updateChecker;
         updateIo.execute(() -> {
-            UpdateInfo value=null; Exception failure=null; try { value=checker.fetch(ua,diagnostics); } catch(Exception e) { failure=e; }
+            UpdateInfo value=null; Exception failure=null; try { value=checker.fetch(ua); } catch(Exception e) { failure=e; }
             UpdateInfo info=value; Exception problem=failure;
             ui.post(() -> {
                 if(isDestroyed()||isFinishing()||exitingForUpdate) return; checkingUpdate=false;
@@ -728,7 +1104,7 @@ public class MainActivity extends Activity {
     }
     private void exitAfterUpdateFailure() {
         if(exitingForUpdate||isFinishing()) return; exitingForUpdate=true; accountEpoch++; loginEpoch++; if(qrController!=null) qrController.close(); if(api!=null) api.cancel();
-        diagnostics.event("UPDATE","startup","EXIT_TO_PROJECT",0,0,0); toast("无法获取更新信息，将打开项目主页并退出应用");
+        toast("无法获取更新信息，将打开项目主页并退出应用");
         try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(UpdateInfo.PROJECT_URL)).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); } catch(Exception e) { toast("无法打开项目主页，应用即将退出"); } finally { finishAndRemoveTask(); }
     }
     private void showPendingUpdate() {
@@ -740,35 +1116,30 @@ public class MainActivity extends Activity {
         Button github=button("GitHub 更新",false,() -> openWeb(info.githubUrl)); github.setEnabled(!info.githubUrl.isEmpty()); sheet.panel.addView(github); gap(sheet.panel,10);
         if(info.downloadUrl.isEmpty()&&info.githubUrl.isEmpty()) { sheet.panel.addView(text("更新链接暂未配置，请稍后重新检查。",12,MUTED,false)); gap(sheet.panel,10); }
         sheet.panel.addView(button("重新检查",false,() -> checkForUpdates(true))); gap(sheet.panel,10);
-        sheet.panel.addView(button(required?"退出应用":"稍后再说",false,() -> { if(required) finishAndRemoveTask(); else { dismissedUpdates.add(info.versionCode); sheet.dialog.dismiss(); } }));
-        sheet.dialog.setCancelable(!required); sheet.dialog.setCanceledOnTouchOutside(!required); sheet.dialog.setOnCancelListener(d -> dismissedUpdates.add(info.versionCode)); sheet.dialog.setOnDismissListener(d -> { if(updateDialog==sheet.dialog) updateDialog=null; }); showSheet(sheet); dialogs.remove(sheet.dialog);
-    }
-    private void exportDiagnostics() {
-        Intent save=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("text/plain").putExtra(Intent.EXTRA_TITLE,"ykt-assistant-"+new java.text.SimpleDateFormat("yyyy-MM-dd",java.util.Locale.ROOT).format(new java.util.Date())+".log");
-        try { startActivityForResult(save,EXPORT_LOGS); } catch(Exception e) { toast("未找到系统文件保存程序"); }
+        if(required) sheet.panel.addView(button("退出应用",false,this::finishAndRemoveTask));
+        sheet.close.setVisibility(required?View.GONE:View.VISIBLE); sheet.dialog.setCancelable(!required); sheet.dialog.setCanceledOnTouchOutside(!required); sheet.dialog.setOnCancelListener(d -> dismissedUpdates.add(info.versionCode)); sheet.dialog.setOnDismissListener(d -> { if(updateDialog==sheet.dialog) updateDialog=null; }); showSheet(sheet); dialogs.remove(sheet.dialog);
     }
 
+
     private static final class Sheet {
-        final Dialog dialog; final LinearLayout panel;
-        Sheet(Dialog dialog,LinearLayout panel) { this.dialog=dialog; this.panel=panel; }
+        final Dialog dialog; final LinearLayout panel; final ImageButton close;
+        Sheet(Dialog dialog,LinearLayout panel,ImageButton close) { this.dialog=dialog; this.panel=panel; this.close=close; }
+    }
+    private ImageButton cardHeader(LinearLayout panel,String title,Dialog dialog,int size) {
+        LinearLayout header=row(); header.setGravity(Gravity.TOP); TextView heading=text(title,size,INK,true); heading.setMinHeight(dp(44)); heading.setGravity(Gravity.CENTER_VERTICAL); header.addView(heading,new LinearLayout.LayoutParams(0,-2,1));
+        ImageButton close=CardDialog.closeButton(this,dialog,title); LinearLayout.LayoutParams params=lp(44,44); params.leftMargin=dp(10); header.addView(close,params); panel.addView(header,lp(-1,-2)); return close;
     }
     private Sheet createSheet(String title,String description) {
-        Dialog dialog=new Dialog(this); LinearLayout panel=column(); panel.setPadding(dp(22),dp(12),dp(22),dp(22)); panel.setBackground(bg(BG,26,0));
-        View handle=new View(this); handle.setBackground(bg(0xffcfd9cb,3,0)); LinearLayout.LayoutParams hp=lp(34,4); hp.gravity=Gravity.CENTER_HORIZONTAL; panel.addView(handle,hp); gap(panel,24);
-        panel.addView(text(title,22,INK,true)); gap(panel,10); panel.addView(text(description,12,MUTED,false)); gap(panel,22); return new Sheet(dialog,panel);
+        Dialog dialog=new CardDialog(this,460); LinearLayout panel=column(); panel.setPadding(dp(22),dp(18),dp(22),dp(22)); panel.setBackground(bg(BG,26,0));
+        ImageButton close=cardHeader(panel,title,dialog,22); gap(panel,8); panel.addView(text(description,12,MUTED,false)); gap(panel,20); return new Sheet(dialog,panel,close);
     }
     private void showSheet(Sheet sheet) {
         dialogs.removeIf(d -> !d.isShowing()); dialogs.add(sheet.dialog);
-        ScrollView scroll=new ScrollView(this); scroll.addView(sheet.panel); sheet.dialog.setContentView(scroll); sheet.dialog.show();
-        if(sheet.dialog.getWindow()!=null) {
-            sheet.dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent); sheet.dialog.getWindow().setGravity(Gravity.BOTTOM);
-            android.view.WindowManager.LayoutParams params=sheet.dialog.getWindow().getAttributes(); params.width=Math.min(getResources().getDisplayMetrics().widthPixels-dp(24),dp(460)); params.height=ViewGroup.LayoutParams.WRAP_CONTENT; params.y=dp(12); params.dimAmount=.32f; sheet.dialog.getWindow().setAttributes(params);
-        }
+        sheet.dialog.setContentView(sheet.panel);
+        sheet.dialog.show();
     }
     private Dialog chooseService(int current,java.util.function.IntConsumer selected) {
-        Dialog picker=new Dialog(this); LinearLayout sheet=column(); sheet.setPadding(dp(20),dp(12),dp(20),dp(20)); sheet.setBackground(bg(BG,26,0));
-        View handle=new View(this); handle.setBackground(bg(0xffcfd9cb,3,0)); LinearLayout.LayoutParams handleParams=lp(34,4); handleParams.gravity=Gravity.CENTER_HORIZONTAL; sheet.addView(handle,handleParams); gap(sheet,24);
-        sheet.addView(text("选择雨课堂版本",22,INK,true)); gap(sheet,8); sheet.addView(text("请选择与你的官方账号一致的版本",12,MUTED,false)); gap(sheet,22);
+        Sheet card=createSheet("选择雨课堂版本","请选择与你的官方账号一致的版本"); Dialog picker=card.dialog; LinearLayout sheet=card.panel;
         String[] descriptions={"标准版课堂服务","荷塘版课堂服务","长江版课堂服务","黄河版课堂服务"};
         for(int i=0;i<RainApi.SERVICES.length;i++) {
             final int index=i; boolean active=i==current;
@@ -780,22 +1151,31 @@ public class MainActivity extends Activity {
             option.setOnClickListener(v -> { selected.accept(index); picker.dismiss(); });
             option.setMinimumHeight(dp(72)); sheet.addView(option,lp(-1,-2)); gap(sheet,10);
         }
-        gap(sheet,4); Button cancel=button("取消",false,picker::dismiss); cancel.setBackground(bg(BG,12,0)); sheet.addView(cancel);
-        ScrollView pickerScroll=new ScrollView(this); pickerScroll.addView(sheet); picker.setContentView(pickerScroll); picker.show();
-        if(picker.getWindow()!=null) {
-            picker.getWindow().setBackgroundDrawableResource(android.R.color.transparent); picker.getWindow().setGravity(Gravity.BOTTOM);
-            android.view.WindowManager.LayoutParams params=picker.getWindow().getAttributes(); params.width=Math.min(getResources().getDisplayMetrics().widthPixels-dp(24),dp(460)); params.height=ViewGroup.LayoutParams.WRAP_CONTENT; params.y=dp(12); params.dimAmount=.32f; picker.getWindow().setAttributes(params);
-        }
+        showSheet(card);
         return picker;
     }
+    private void addLoginAlternatives(LinearLayout form,Button... choices) {
+        gap(form,16);
+        form.addView(text("使用其他方式登录",11,MUTED,false));
+        gap(form,8);
+        LinearLayout alternatives=row();
+        for(Button choice:choices) {
+            choice.setTextSize(11);
+            choice.setPadding(dp(5),0,dp(5),0);
+            LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(44),1);
+            if(alternatives.getChildCount()>0) params.leftMargin=dp(6);
+            alternatives.addView(choice,params);
+        }
+        form.addView(alternatives);
+    }
+
     private void openLogin() {
-        if(downloading||joining) { toast("请先完成当前任务"); return; }
+        if(downloading||joining||batchCheckin!=null||switchingAccount) { toast("请先完成当前任务"); return; }
         if(user!=null) { toast("请先退出当前账号"); return; }
         if(loginDialog!=null&&loginDialog.isShowing()) return;
-        final Dialog dialog=new Dialog(this); loginDialog=dialog;
+        final Dialog dialog=new CardDialog(this,460); loginDialog=dialog;
         ScrollView scroll=new ScrollView(this); LinearLayout form=column(); form.setPadding(dp(24),dp(28),dp(24),dp(18)); form.setBackground(bg(BG,26,0)); scroll.addView(form); dialog.setContentView(scroll);
-        form.addView(lineLabel("WELCOME TO YOUR CLASSROOM")); gap(form,12); form.addView(text("扫码连接课堂",25,INK,true)); gap(form,10); form.addView(text("二维码失效后会自动重新获取；请扫描当前显示的新码。",12,MUTED,false)); gap(form,20);
-        LinearLayout alternatives=row(); Button password=button("账号密码登录",false,() -> { dialog.dismiss(); openAccountLogin(false); }),sms=button("验证码登录",false,() -> { dialog.dismiss(); openAccountLogin(true); }); LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,dp(44),1); left.rightMargin=dp(5); alternatives.addView(password,left); alternatives.addView(sms,new LinearLayout.LayoutParams(0,dp(44),1)); form.addView(alternatives); gap(form,18);
+        cardHeader(form,"扫码连接课堂",dialog,23); gap(form,8); form.addView(text("使用微信扫描当前二维码，失效后会自动重新获取。",12,MUTED,false)); gap(form,18);
         final int[] service={prefs.getInt("service",0)};
         form.addView(text("雨课堂版本",12,MUTED,true)); gap(form,9);
         Button servicePicker=button(RainApi.SERVICES[service[0]],false,() -> {}); servicePicker.setContentDescription("雨课堂版本："+RainApi.SERVICES[service[0]]+"，点击切换"); form.addView(servicePicker); gap(form,18);
@@ -803,11 +1183,15 @@ public class MainActivity extends Activity {
         ImageView qrImage=new ImageView(this); qrImage.setScaleType(ImageView.ScaleType.FIT_CENTER); qrImage.setPadding(dp(16),dp(16),dp(16),dp(16)); qrImage.setContentDescription("雨课堂官方登录二维码"); qrFrame.addView(qrImage,new FrameLayout.LayoutParams(-1,-1));
         TextView placeholder=text("正在获取新的登录二维码…",13,MUTED,false); placeholder.setGravity(Gravity.CENTER); placeholder.setPadding(dp(18),0,dp(18),0); qrFrame.addView(placeholder,new FrameLayout.LayoutParams(-1,-1)); form.addView(qrFrame,lp(-1,224)); gap(form,14);
         TextView hint=text("正在连接官方登录服务…",12,MUTED,false); hint.setGravity(Gravity.CENTER); form.addView(hint); gap(form,18);
-        Button qrButton=button("正在获取二维码…",true,() -> {}); qrButton.setEnabled(false); form.addView(qrButton); gap(form,10); form.addView(button("稍后再说",false,dialog::dismiss));
+        Button qrButton=button("正在获取二维码…",true,() -> {}); qrButton.setEnabled(false); form.addView(qrButton);
+        addLoginAlternatives(form,
+            button("账号密码登录",false,() -> { dialog.dismiss(); openAccountLogin(false); }),
+            button("验证码登录",false,() -> { dialog.dismiss(); openAccountLogin(true); }),
+            button("Cookie 登录",false,() -> { dialog.dismiss(); openCookieLogin(); }));
         accountEpoch++; busyCount=0; showLoading(); retire(api);
         final QrLoginController.State[] state={QrLoginController.State.FETCHING}; final Dialog[] picker={null},confirmation={null};
-        QrLoginController controller=new QrLoginController((selected,round) -> {
-            vault.clear(); prefs.edit().putInt("service",selected).apply(); RainApi client=configureApi(createLoginClient(selected,vault.session())); client.setDiagnostics(diagnostics,round); return client;
+        QrLoginController controller=new QrLoginController(selected -> {
+            vault.clear(); prefs.edit().putInt("service",selected).apply(); RainApi client=configureApi(createLoginClient(selected,vault.session())); return client;
         },new QrLoginController.Listener() {
             @Override public void state(QrLoginController.State next,Bitmap image,String message,RainApi owner) {
                 if(loginDialog!=dialog||!dialog.isShowing()||user!=null) return; state[0]=next; if(owner!=null) api=owner;
@@ -818,13 +1202,13 @@ public class MainActivity extends Activity {
                 if(loginDialog!=dialog||!dialog.isShowing()||user!=null) { owner.cancel(); return; }
                 if(picker[0]!=null) picker[0].dismiss(); if(confirmation[0]!=null) confirmation[0].dismiss(); loginSuccess(profile,owner);
             }
-        },diagnostics);
+        });
         qrController=controller;
         qrButton.setOnClickListener(v -> {
             if(state[0]==QrLoginController.State.PROFILE_FAILED) { controller.retryProfile(); return; }
             if(confirmation[0]!=null&&confirmation[0].isShowing()) return;
             Sheet sheet=createSheet("刷新登录二维码？","确认后将停用当前二维码，获取新码并重新等待扫码。"); confirmation[0]=sheet.dialog;
-            sheet.panel.addView(button("确认刷新",true,() -> { sheet.dialog.dismiss(); controller.start(service[0]); })); gap(sheet.panel,10); sheet.panel.addView(button("继续扫码",false,sheet.dialog::dismiss)); showSheet(sheet);
+            sheet.panel.addView(button("确认刷新",true,() -> { sheet.dialog.dismiss(); controller.start(service[0]); }));  showSheet(sheet);
         });
         servicePicker.setOnClickListener(v -> {
             if(picker[0]!=null&&picker[0].isShowing()) return;
@@ -832,32 +1216,33 @@ public class MainActivity extends Activity {
         });
         dialog.setOnDismissListener(d -> {
             controller.close(); if(qrController==controller) qrController=null; if(picker[0]!=null) picker[0].dismiss(); if(confirmation[0]!=null) confirmation[0].dismiss();
-            if(loginDialog!=dialog) return; loginDialog=null; loginEpoch++;
+            if(loginDialog!=dialog) return; loginDialog=null; loginEpoch++; maybeRestoreAddedAccount();
             if(user==null) { vault.clear(); if(!isDestroyed()&&!isFinishing()) try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception ignored) {} }
         });
-        dialog.show(); if(dialog.getWindow()!=null) { dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent); dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(32),dp(460)),-2); dialog.getWindow().setDimAmount(.32f); }
+        dialog.show();
         controller.start(service[0]);
     }
     protected Dialog showHumanVerification(RainApi client,HumanVerification.Callback callback) {
-        if(humanVerificationDialog!=null) humanVerificationDialog.dismiss(); long started=System.nanoTime(); client.trace("HUMAN","REQUEST",0,0,0);
-        humanVerificationDialog=HumanVerification.show(this,client.host(),UserAgent.current(prefs),new HumanVerification.Callback() {
-            @Override public void verified(HumanVerification.Proof proof) { client.trace("HUMAN","ACCEPTED",0,0,(System.nanoTime()-started)/1000000); callback.verified(proof); }
-            @Override public void cancelled(String reason) { client.trace("HUMAN",reason!=null&&reason.startsWith("已取消")?"CANCELLED":"FAILED",0,0,(System.nanoTime()-started)/1000000); callback.cancelled(reason); }
-        }); return humanVerificationDialog;
+        if(humanVerificationDialog!=null) humanVerificationDialog.dismiss(); humanVerificationDialog=HumanVerification.show(this,client.host(),UserAgent.current(prefs),callback); return humanVerificationDialog;
     }
     private android.widget.EditText loginField(String hint,boolean secret) {
         android.widget.EditText input=new android.widget.EditText(this); input.setHint(hint); input.setContentDescription(hint); input.setTextSize(14); input.setTextColor(INK); input.setHintTextColor(MUTED); input.setSingleLine(true); input.setPadding(dp(14),dp(12),dp(14),dp(12)); input.setBackground(bg(WHITE,12,LINE)); input.setSaveEnabled(false); input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS); input.setInputType(secret?android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD:android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS); return input;
     }
     private void openAccountLogin(boolean smsFirst) {
         if(user!=null||downloading||joining||(loginDialog!=null&&loginDialog.isShowing())) return;
-        final Dialog dialog=new Dialog(this); loginDialog=dialog; accountEpoch++; busyCount=0; showLoading();
+        final Dialog dialog=new CardDialog(this,460); loginDialog=dialog; accountEpoch++; busyCount=0; showLoading();
         LinearLayout form=column(); form.setPadding(dp(24),dp(26),dp(24),dp(20)); form.setBackground(bg(BG,24,0)); ScrollView scroll=new ScrollView(this); scroll.addView(form); dialog.setContentView(scroll);
-        form.addView(text("登录雨课堂",25,INK,true)); gap(form,10); form.addView(text("账号仅提交到所选雨课堂；密码不在本地保存。",12,MUTED,false)); gap(form,18);
+        cardHeader(form,"登录雨课堂",dialog,25); gap(form,10); form.addView(text("账号仅提交到所选雨课堂；密码不在本地保存。",12,MUTED,false)); gap(form,18);
         Button server=button(RainApi.SERVICES[prefs.getInt("service",0)],false,() -> {}); form.addView(server); gap(form,14);
-        LinearLayout modes=row(); Button passwordMode=button("账号密码",false,() -> {}),smsMode=button("短信验证码",false,() -> {}); LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,dp(44),1); left.rightMargin=dp(5); modes.addView(passwordMode,left); LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,dp(44),1); right.leftMargin=dp(5); modes.addView(smsMode,right); form.addView(modes); gap(form,18);
         android.widget.EditText identity=loginField("手机号或邮箱",false),secret=loginField("密码",true); form.addView(identity,lp(-1,50)); gap(form,12); form.addView(secret,lp(-1,50)); gap(form,12);
         Button send=button("获取验证码",false,() -> {}); form.addView(send); gap(form,10); TextView message=text("",12,0xffa35445,false); message.setTextIsSelectable(true); form.addView(message); gap(form,10);
-        Button submit=button("登录",true,() -> {}); form.addView(submit); gap(form,10); Button qr=button("使用二维码登录",false,() -> { dialog.dismiss(); openLogin(); }); form.addView(qr); gap(form,10); form.addView(button("取消",false,dialog::dismiss));
+        Button submit=button("登录",true,() -> {});
+        form.addView(submit);
+        Runnable[] nextLogin={null};
+        Button qr=button("二维码登录",false,() -> { nextLogin[0]=this::openLogin; dialog.dismiss(); });
+        Button alternative=button("",false,() -> {});
+        Button cookie=button("Cookie 登录",false,() -> { nextLogin[0]=this::openCookieLogin; dialog.dismiss(); });
+        addLoginAlternatives(form,qr,alternative,cookie);
         class CredentialFlow {
             boolean sms=smsFirst,busy,disposed; int service=prefs.getInt("service",0),run; RainApi client; Dialog challenge,picker;
             String sentPhone=""; HumanVerification.Proof sentProof;
@@ -869,9 +1254,10 @@ public class MainActivity extends Activity {
                 secret.setHint(sms?"短信验证码":"密码"); secret.setContentDescription(sms?"短信验证码":"密码"); secret.setInputType(sms?android.text.InputType.TYPE_CLASS_NUMBER:android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
             }
             void labels() {
-                passwordMode.setSelected(!sms); smsMode.setSelected(sms); passwordMode.setTextColor(!sms?WHITE:GREEN); passwordMode.setBackground(bg(!sms?GREEN:WHITE,12,!sms?0:LINE)); smsMode.setTextColor(sms?WHITE:GREEN); smsMode.setBackground(bg(sms?GREEN:WHITE,12,sms?0:LINE)); send.setVisibility(sms?View.VISIBLE:View.GONE);
+                alternative.setText(sms?"账号密码登录":"验证码登录");
+                send.setVisibility(sms?View.VISIBLE:View.GONE);
                 long remaining=cooldown.getOrDefault(service+"|"+identity.getText().toString().trim(),0L)-android.os.SystemClock.elapsedRealtime(),seconds=Math.max(0,(remaining+999)/1000);
-                send.setText(seconds>0?seconds+" 秒后重试":"获取验证码"); send.setEnabled(!busy&&seconds==0&&client!=null); submit.setEnabled(!busy&&client!=null); submit.setText(busy?"处理中…":"登录"); identity.setEnabled(!busy); secret.setEnabled(!busy); qr.setEnabled(!busy);
+                send.setText(seconds>0?seconds+" 秒后重试":"获取验证码"); send.setEnabled(!busy&&seconds==0&&client!=null); submit.setEnabled(!busy&&client!=null); submit.setText(busy?"处理中…":"登录"); identity.setEnabled(!busy); secret.setEnabled(!busy); qr.setEnabled(!busy); cookie.setEnabled(!busy);
             }
             void start() {
                 if(disposed) return; run=++loginEpoch; busy=false; sentPhone=""; sentProof=null; secret.setText(""); message.setText(""); fields(); if(challenge!=null) challenge.dismiss(); challenge=null;
@@ -909,45 +1295,88 @@ public class MainActivity extends Activity {
             }
             void dispose() {
                 disposed=true; ui.removeCallbacks(tick); secret.setText(""); sentProof=null; if(challenge!=null) challenge.dismiss(); if(picker!=null) picker.dismiss();
-                if(loginDialog!=dialog) return; loginDialog=null; loginEpoch++;
+                if(loginDialog!=dialog) return; loginDialog=null; loginEpoch++; maybeRestoreAddedAccount();
                 if(user==null) { vault.clear(); retire(client); if(!isDestroyed()&&!isFinishing()) try { api=configureApi(new RainApi(prefs.getInt("service",0),vault.session())); } catch(Exception ignored) {} }
             }
         }
-        CredentialFlow flow=new CredentialFlow(); passwordMode.setOnClickListener(v -> { if(flow.sms) { flow.sms=false; flow.start(); } }); smsMode.setOnClickListener(v -> { if(!flow.sms) { flow.sms=true; flow.start(); } });
+        CredentialFlow flow=new CredentialFlow();
+        alternative.setOnClickListener(v -> { flow.sms=!flow.sms; flow.start(); });
         server.setOnClickListener(v -> { if(flow.picker!=null&&flow.picker.isShowing()) return; flow.picker=chooseService(flow.service,index -> { if(flow.disposed||index==flow.service) return; flow.service=index; flow.start(); }); }); submit.setOnClickListener(v -> flow.login()); send.setOnClickListener(v -> flow.sendCode());
-        dialog.setOnDismissListener(d -> flow.dispose()); dialog.show(); if(dialog.getWindow()!=null) { dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent); dialog.getWindow().setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(32),dp(460)),-2); dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE); } flow.start(); ui.post(flow.tick);
+        dialog.setOnDismissListener(d -> {
+            flow.dispose();
+            if(nextLogin[0]!=null&&!isDestroyed()&&!isFinishing()&&user==null) nextLogin[0].run();
+        }); dialog.show(); flow.start(); ui.post(flow.tick);
     }
 
-    private RainApi configureApi(RainApi client) { client.configure(lessonCache.session()); client.setDiagnostics(diagnostics,"client-"+java.util.UUID.randomUUID()); client.setUserAgent(UserAgent.current(prefs)); client.setDeviceInfo(UserAgent.deviceBrand(),UserAgent.deviceVersion()); return client; }
+    private RainApi configureApi(RainApi client) { client.configure(lessonCache.session()); client.setUserAgent(UserAgent.current(prefs)); client.setDeviceInfo(UserAgent.deviceBrand(),UserAgent.deviceVersion()); return client; }
     protected RainApi createLoginClient(int service,RainApi.CookieStorage storage) throws Exception { return new RainApi(service,storage); }
 
-    private void loginSuccess(JSONObject profile,RainApi a) { try { a.rememberLogin(); } catch(Exception e) { retire(a); toast(error(e)); return; } api=a; user=profile; loginEpoch++; if(loginDialog!=null) loginDialog.dismiss(); tab=0; catalog=null; onlyLive=false; courseError=null; courseUpdated=0; render(); loadCourses(); if(a.storageWarning()!=null) toast(a.storageWarning()); else toast("登录成功，欢迎回来"); }
+    private void rememberAccount(JSONObject profile,RainApi client) throws Exception {
+        String key=accounts.remember(prefs.getInt("service",0),profile,client.cookieSnapshot()); client.promoteSession(accounts.mirror(vault.session(),key)); client.rememberLogin(); accounts.active(key); addingAccountFrom=null;
+    }
+    private void loginSuccess(JSONObject profile,RainApi a) { try { a.rememberLogin(); rememberAccount(profile,a); } catch(Exception e) { retire(a); toast(error(e)); return; } api=a; user=profile; loginEpoch++; if(loginDialog!=null) loginDialog.dismiss(); tab=0; catalog=null; onlyLive=false; courseError=null; courseUpdated=0; render(); loadCourses(); if(a.storageWarning()!=null) toast(a.storageWarning()); else toast("登录成功，欢迎回来"); }
     private boolean checkingLocation;
     private int locationRevision;
     private Dialog locationDialog;
+    private MultiAccountLocations locationSyncJob;private Dialog locationSyncDialog;
+    private final java.util.Set<String> locationSyncSubmitted=java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    private void stopLocationSync(){MultiAccountLocations job=locationSyncJob;locationSyncJob=null;if(job!=null)job.close();Dialog dialog=locationSyncDialog;locationSyncDialog=null;if(dialog!=null)dialog.dismiss();}
     private boolean activeLocation(RainApi owner,String lesson,int revision) { return revision==locationRevision&&owner==api&&!owner.isClosed()&&lesson.equals(owner.lesson())&&!isDestroyed()&&!isFinishing(); }
-    private void cancelLocationFlow() { locationRevision++; checkingLocation=false; locationSubmitting=false; if(locationDialog!=null) locationDialog.dismiss(); locationDialog=null; }
+    private void cancelLocationFlow() { stopLocationSync();locationRevision++; checkingLocation=false; locationSubmitting=false; if(locationDialog!=null) locationDialog.dismiss(); locationDialog=null; }
     private void checkLocation() {
-        if(!hasLesson()||joining||locationSubmitting||checkingLocation||(locationDialog!=null&&locationDialog.isShowing())) return;
+        if(!hasLesson()||joining||locationSubmitting||checkingLocation||batchCheckin!=null||locationSyncJob!=null||(locationDialog!=null&&locationDialog.isShowing())) return;
         RainApi owner=api; String lesson=owner.lesson(); int revision=++locationRevision; checkingLocation=true;
         work(owner::locationInfo,info -> {
             if(revision==locationRevision) checkingLocation=false; if(!activeLocation(owner,lesson,revision)) return;
-            if(info.signed) { toast("位置签到已由雨课堂确认"); return; }
-            if(Boolean.FALSE.equals(info.needed)) { toast("当前位置签到尚未开始或已结束"); return; }
-            try { info.requireAvailable(); } catch(Exception e) { toast(error(e)); return; }
+            SyncSettings locationPrefs=syncSettings();boolean multiple=locationPrefs!=null&&locationPrefs.available();
+            if(info.signed&&(!multiple||info.point==null)) { toast("位置签到已由雨课堂确认"); return; }
+            if(!info.signed&&Boolean.FALSE.equals(info.needed)) { toast("当前位置签到尚未开始或已结束"); return; }
+            try { if(!info.signed)info.requireAvailable(); } catch(Exception e) { toast(error(e)); return; }
             if(tab!=1||dynamicView!=LIVE_READER) return;
-            Sheet sheet=createSheet(info.submitted?"等待签到确认":"位置签到",info.submitted?"本轮已提交位置，雨课堂尚未确认。刷新状态不会重复提交。":"将使用雨课堂返回的签到位置提交，不读取手机定位。"); locationDialog=sheet.dialog;
-            LinearLayout position=compactCard(); position.addView(text(info.address.isEmpty()?"课堂签到位置":info.address,14,INK,true)); gap(position,8); position.addView(text(String.format(java.util.Locale.ROOT,"%.6f, %.6f",info.point.lat,info.point.lng),12,MUTED,false)); sheet.panel.addView(position); gap(sheet.panel,16);
+            Sheet sheet=createSheet(info.signed?"位置签到已确认":info.submitted?"等待签到确认":"位置签到",info.signed?"当前账号已签到，可为所选其他账号提交下面的坐标。":info.submitted?"本轮已提交位置，雨课堂尚未确认。刷新状态不会重复提交。":"默认使用课堂返回的坐标，可修改或在默认位置周围随机生成。"); locationDialog=sheet.dialog;
+            LinearLayout position=compactCard(),positionHeader=row(); positionHeader.addView(text(info.address.isEmpty()?"课堂默认位置":info.address,14,INK,true),new LinearLayout.LayoutParams(0,-2,1));
+            final double[] randomRadius={50}; try { randomRadius[0]=LocationCoordinates.parseRadius(prefs.getString(LocationCoordinates.RADIUS_KEY,"50")); } catch(IllegalArgumentException ignored) {}
+            final Dialog[] radiusPicker={null};
+            Button random=button("随机 "+LocationCoordinates.radiusLabel(randomRadius[0])+" 米",false,()->{}); random.setTextSize(11); random.setPadding(dp(8),0,dp(8),0); LinearLayout.LayoutParams randomParams=lp(88,36); randomParams.leftMargin=dp(8); positionHeader.addView(random,randomParams); position.addView(positionHeader); gap(position,8);
+            position.addView(text(String.format(java.util.Locale.ROOT,"%.6f, %.6f",info.point.lat,info.point.lng),12,MUTED,false)); gap(position,12);
+            LinearLayout fields=row(),latColumn=column(),lngColumn=column(); latColumn.addView(text("纬度",11,MUTED,false)); lngColumn.addView(text("经度",11,MUTED,false)); gap(latColumn,6); gap(lngColumn,6);
+            android.widget.EditText latitude=loginField("纬度",false),longitude=loginField("经度",false);
+            latitude.setTag("location-latitude"); longitude.setTag("location-longitude"); latitude.setContentDescription("签到纬度"); longitude.setContentDescription("签到经度");
+            for(android.widget.EditText input:new android.widget.EditText[]{latitude,longitude}) { input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER|android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL|android.text.InputType.TYPE_NUMBER_FLAG_SIGNED); input.setTextSize(13); input.setPadding(dp(10),dp(10),dp(10),dp(10)); input.setSaveEnabled(false); }
+            latitude.setText(LocationCoordinates.format(info.point.lat)); longitude.setText(LocationCoordinates.format(info.point.lng)); latColumn.addView(latitude,lp(-1,46)); lngColumn.addView(longitude,lp(-1,46));
+            fields.addView(latColumn,new LinearLayout.LayoutParams(0,-2,1)); LinearLayout.LayoutParams lngParams=new LinearLayout.LayoutParams(0,-2,1); lngParams.leftMargin=dp(10); fields.addView(lngColumn,lngParams); position.addView(fields); gap(position,10);
+            LinearLayout resetRow=row(); TextView hint=text("长按随机按钮修改距离 · 默认位置周围 "+LocationCoordinates.radiusLabel(randomRadius[0])+" 米",10,MUTED,false); resetRow.addView(hint,new LinearLayout.LayoutParams(0,-2,1)); TextView reset=text("恢复默认",11,GREEN,true); reset.setMinHeight(dp(36)); reset.setGravity(Gravity.CENTER); reset.setPadding(dp(8),0,0,0); reset.setOnClickListener(v->{ latitude.setText(LocationCoordinates.format(info.point.lat)); longitude.setText(LocationCoordinates.format(info.point.lng)); }); resetRow.addView(reset); position.addView(resetRow);
+            random.setOnClickListener(v->{ LocationCheckin.Point value=LocationCoordinates.random(info.point,randomRadius[0]); latitude.setText(LocationCoordinates.format(value.lat)); longitude.setText(LocationCoordinates.format(value.lng)); });
+            random.setOnLongClickListener(v->{
+                if(!activeLocation(owner,lesson,revision)||!random.isEnabled()) return true;
+                Sheet editor=createSheet("随机距离","以课堂默认坐标为中心，距离单位为米，支持 1～10000 米。"); radiusPicker[0]=editor.dialog;
+                android.widget.EditText distance=loginField("随机距离（米）",false); distance.setTag("location-random-radius"); distance.setInputType(android.text.InputType.TYPE_CLASS_NUMBER|android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL); distance.setText(LocationCoordinates.radiusLabel(randomRadius[0])); editor.panel.addView(distance,lp(-1,48)); gap(editor.panel,10); TextView validation=text("",12,0xffa35445,false); editor.panel.addView(validation); gap(editor.panel,10);
+                editor.panel.addView(button("保存距离",true,()-> {
+                    if(!activeLocation(owner,lesson,revision)||locationDialog!=sheet.dialog||!sheet.dialog.isShowing()||!random.isEnabled()) { editor.dialog.dismiss(); return; }
+                    try { double value=LocationCoordinates.parseRadius(distance.getText().toString()); String label=LocationCoordinates.radiusLabel(value); prefs.edit().putString(LocationCoordinates.RADIUS_KEY,label).apply(); randomRadius[0]=value; random.setText("随机 "+label+" 米"); hint.setText("长按随机按钮修改距离 · 默认位置周围 "+label+" 米"); editor.dialog.dismiss(); } catch(IllegalArgumentException e) { validation.setText(e.getMessage()); }
+                }));  editor.dialog.setOnDismissListener(d->{ if(radiusPicker[0]==editor.dialog) radiusPicker[0]=null; }); showSheet(editor); return true;
+            });
+            for(View control:new View[]{latitude,longitude,random,reset}) control.setEnabled(!info.submitted||info.signed);
+            sheet.panel.addView(position); gap(sheet.panel,16);
+            Button confirm=button(info.signed?"同步其他账号位置签到":info.submitted?"本轮已提交":"确认位置签到",true,()->{});
+            SyncControls locationSync=multiple?new SyncControls(this,locationPrefs,SyncSettings.CHECKIN,()->{if(info.signed)confirm.setEnabled(locationPrefs.enabled(SyncSettings.CHECKIN)&&!locationPrefs.selected(SyncSettings.CHECKIN).isEmpty());}):null;
+            if(locationSync!=null){locationSync.label("同步位置签到");sheet.panel.addView(locationSync);gap(sheet.panel,10);}confirm.setEnabled(info.signed?multiple&&locationPrefs.enabled(SyncSettings.CHECKIN)&&!locationPrefs.selected(SyncSettings.CHECKIN).isEmpty():!info.submitted);
             TextView result=text("",12,0xffa35445,false); sheet.panel.addView(result); gap(sheet.panel,10);
-            Button confirm=button(info.submitted?"本轮已提交":"确认位置签到",true,() -> {}); confirm.setEnabled(!info.submitted); sheet.panel.addView(confirm); gap(sheet.panel,10);
-            Button refresh=button("刷新状态",false,() -> { sheet.dialog.dismiss(); checkLocation(); }); sheet.panel.addView(refresh); gap(sheet.panel,10); Button cancel=button("关闭",false,sheet.dialog::dismiss); sheet.panel.addView(cancel);
+            sheet.panel.addView(confirm); gap(sheet.panel,10);
+            Button refresh=button("刷新状态",false,() -> { sheet.dialog.dismiss(); checkLocation(); }); sheet.panel.addView(refresh); View cancel=sheet.close;
             confirm.setOnClickListener(v -> {
                 if(!activeLocation(owner,lesson,revision)||locationSubmitting) return;
+                List<AccountStore.Account> targets=multiple&&locationPrefs.enabled(SyncSettings.CHECKIN)?locationPrefs.selected(SyncSettings.CHECKIN):new ArrayList<>();
+                if(info.signed&&targets.isEmpty()){result.setText("请勾选同步位置签到并选择账号");return;}
+                final LocationCheckin.Point selected;
+                try { selected=LocationCoordinates.parse(latitude.getText().toString(),longitude.getText().toString()); } catch(IllegalArgumentException e) { result.setText(e.getMessage()); return; }
+                if(info.signed){sheet.dialog.dismiss();startOtherLocationSigns(owner,info,selected,targets,revision);return;}
+                for(View control:new View[]{latitude,longitude,random,reset}) control.setEnabled(false);if(locationSync!=null)locationSync.setEnabled(false);
                 locationSubmitting=true; confirm.setEnabled(false); confirm.setText("正在提交…"); refresh.setEnabled(false); cancel.setEnabled(false); sheet.dialog.setCancelable(false);
-                work(() -> owner.submitServerLocation(info),state -> {
+                work(() -> owner.submitServerLocation(info,selected),state -> {
                     if(revision==locationRevision) locationSubmitting=false;
                     if(!activeLocation(owner,lesson,revision)) { if(revision==locationRevision&&owner==api) sheet.dialog.dismiss(); return; }
-                    if(state.signed) { sheet.dialog.dismiss(); toast("位置签到成功，雨课堂已确认"); return; }
+                    if(state.signed) { sheet.dialog.dismiss(); toast("位置签到成功，雨课堂已确认");startOtherLocationSigns(owner,info,selected,targets,revision); return; }
                     confirm.setText("本轮已提交"); result.setText("位置已提交，雨课堂尚未确认。可刷新状态查看结果。"); refresh.setEnabled(true); cancel.setEnabled(true); sheet.dialog.setCancelable(true);
                 },e -> {
                     if(revision==locationRevision) locationSubmitting=false;
@@ -955,8 +1384,14 @@ public class MainActivity extends Activity {
                     result.setText(error(e)); confirm.setText("请重新查询状态"); refresh.setEnabled(true); cancel.setEnabled(true); sheet.dialog.setCancelable(true);
                 });
             });
-            sheet.dialog.setOnDismissListener(d -> { if(locationDialog==sheet.dialog) locationDialog=null; }); showSheet(sheet);
+            sheet.dialog.setOnDismissListener(d -> { if(radiusPicker[0]!=null) radiusPicker[0].dismiss(); if(locationDialog==sheet.dialog) locationDialog=null; }); showSheet(sheet);
         },e -> { if(revision==locationRevision&&owner==api) { checkingLocation=false; toast(error(e)); } });
+    }
+    private void startOtherLocationSigns(RainApi owner,LocationCheckin info,LocationCheckin.Point coordinates,List<AccountStore.Account> selected,int revision){
+        if(selected.isEmpty()||locationSyncJob!=null||!foreground||!activeLocation(owner,info.lesson,revision))return;int epoch=accountEpoch,service=prefs.getInt("service",0);String active=AccountStore.key(service,user.optString("user_id"));MultiAccountLocations job=new MultiAccountLocations(accounts,this::createSavedAccountClient,locationSyncSubmitted);locationSyncJob=job;SyncSettings settings=syncSettings();Sheet feedback=settings!=null&&settings.resultCards()?createSheet("同步位置签到","依次查询所选账号，已确认的签到不会重复提交。"):null;java.util.Map<String,TextView> labels=new java.util.LinkedHashMap<>();
+        if(feedback!=null){locationSyncDialog=feedback.dialog;for(AccountStore.Account account:selected){feedback.panel.addView(text(account.name,15,INK,true));TextView state=text("等待处理",12,MUTED,false);labels.put(account.key,state);feedback.panel.addView(state);gap(feedback.panel,12);}feedback.dialog.setOnDismissListener(d->{job.close();if(locationSyncJob==job)locationSyncJob=null;if(locationSyncDialog==feedback.dialog)locationSyncDialog=null;});showSheet(feedback);}
+        java.util.function.BooleanSupplier valid=()->locationSyncJob==job&&epoch==accountEpoch&&foreground&&tab==1&&dynamicView==LIVE_READER&&activeLocation(owner,info.lesson,revision);
+        work(()->job.run(selected,service,active,info,coordinates,owner::locationInfo,valid,(account,state)->ui.post(()->{if(valid.getAsBoolean()&&feedback!=null&&labels.containsKey(account.key))labels.get(account.key).setText(state);})),results->{boolean show=valid.getAsBoolean()&&!job.cancelled();if(locationSyncJob==job)locationSyncJob=null;if(show){String summary=SyncFeedback.summary("位置签到",results,result->result.success);if(feedback==null)toast(summary);else{gap(feedback.panel,8);feedback.panel.addView(text(summary,13,GREEN,true));}}job.close();},error->{if(locationSyncJob==job)locationSyncJob=null;job.close();if(epoch==accountEpoch)toast("同步位置签到未完成，请重新查询状态");});
     }
     private void downloadOptions() {
         JSONObject shown=readerPresentation();
@@ -982,7 +1417,7 @@ public class MainActivity extends Activity {
             String title=selectedPresentation.optString("title","雨课堂课件").replaceAll("[\\\\/:*?\"<>|]","_");
             Intent save=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(mime).putExtra(Intent.EXTRA_TITLE,title+"."+format);
             try { startActivityForResult(save,SAVE); } catch(Exception e) { pendingFormat=null; exportPresentation=null; pendingExportApi=null; toast("未找到系统文件保存程序"); }
-        })); gap(sheet.panel,10); sheet.panel.addView(button("取消",false,sheet.dialog::dismiss)); showSheet(sheet);
+        }));  showSheet(sheet);
     }
     private SingleImageFile pendingImage;
     private ImageSaveJob imageJob;
@@ -1005,12 +1440,12 @@ public class MainActivity extends Activity {
             sheet.dialog.dismiss(); if(account!=accountEpoch||owner==null||api!=owner||owner.isClosed()) { toast("账号已变更，请重新选择图片"); return; }
             if(downloading||pendingFormat!=null) { toast("已有保存任务，请先完成"); return; }
             fetchSingleImage(owner,slide,title,index+1);
-        })); gap(sheet.panel,10); sheet.panel.addView(button("取消",false,sheet.dialog::dismiss)); showSheet(sheet);
+        }));  showSheet(sheet);
     }
     private void fetchSingleImage(RainApi owner,JSONObject slide,String title,int pageNumber) {
         ImageSaveJob job=new ImageSaveJob(owner); imageJob=job; downloading=true; pendingFormat="image";
-        Sheet loading=createSheet("正在读取图片","读取完成后可选择图片保存位置。"); ProgressBar spinner=new ProgressBar(this); spinner.setIndeterminateTintList(ColorStateList.valueOf(GREEN)); LinearLayout.LayoutParams p=lp(28,28); p.gravity=Gravity.CENTER_HORIZONTAL; loading.panel.addView(spinner,p); gap(loading.panel,18); loading.panel.addView(button("取消保存",false,() -> { job.cancel(); loading.dialog.dismiss(); }));
-        loading.dialog.setOnDismissListener(d -> { if(imageJob==job&&downloading) job.cancel(); }); showSheet(loading);
+        Sheet loading=createSheet("正在读取图片","读取完成后可选择图片保存位置。"); ProgressBar spinner=new ProgressBar(this); spinner.setIndeterminateTintList(ColorStateList.valueOf(GREEN)); LinearLayout.LayoutParams p=lp(28,28); p.gravity=Gravity.CENTER_HORIZONTAL; loading.panel.addView(spinner,p); gap(loading.panel,18);
+        loading.close.setOnClickListener(v->{ job.cancel(); loading.dialog.cancel(); }); loading.dialog.setOnDismissListener(d -> { if(imageJob==job&&downloading) job.cancel(); }); showSheet(loading);
         work(() -> { SingleImageFile file=SingleImageFile.from(owner.slideImage(slide,job)); if(job.getAsBoolean()) throw new java.io.InterruptedIOException("保存已取消"); return file; },file -> {
             if(imageJob!=job) return; downloading=false; loading.dialog.dismiss();
             if(job.getAsBoolean()) { clearSingleImage(job); toast("已取消保存"); return; }
@@ -1031,7 +1466,7 @@ public class MainActivity extends Activity {
         if(result!=RESULT_OK||data==null||data.getData()==null) { if(job!=null) { job.cancel(); clearSingleImage(job); } return; }
         Uri uri=data.getData();
         if(job==null||file==null||job.getAsBoolean()||job.owner!=api) { deleteImageDocument(uri); if(job!=null) clearSingleImage(job); toast("保存请求已失效，请重新选择图片"); return; }
-        downloading=true; Sheet saving=createSheet("保存本页图片","正在保存到你选择的位置…"); ProgressBar bar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal); bar.setMax(100); bar.setProgressTintList(ColorStateList.valueOf(GREEN)); saving.panel.addView(bar,lp(-1,8)); gap(saving.panel,16); TextView percent=text("0%",13,GREEN,true); percent.setGravity(Gravity.CENTER); saving.panel.addView(percent); gap(saving.panel,18); saving.panel.addView(button("取消保存",false,() -> { job.cancel(); saving.dialog.dismiss(); })); saving.dialog.setOnDismissListener(d -> { if(imageJob==job&&downloading) job.cancel(); }); showSheet(saving);
+        downloading=true; Sheet saving=createSheet("保存本页图片","正在保存到你选择的位置…"); ProgressBar bar=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal); bar.setMax(100); bar.setProgressTintList(ColorStateList.valueOf(GREEN)); saving.panel.addView(bar,lp(-1,8)); gap(saving.panel,16); TextView percent=text("0%",13,GREEN,true); percent.setGravity(Gravity.CENTER); saving.panel.addView(percent); gap(saving.panel,18);  saving.close.setOnClickListener(v->{ job.cancel(); saving.dialog.cancel(); }); saving.dialog.setOnDismissListener(d -> { if(imageJob==job&&downloading) job.cancel(); }); showSheet(saving);
         work(() -> { try { file.save(this,uri,job,value -> ui.post(() -> { if(!isDestroyed()&&imageJob==job&&!job.getAsBoolean()) { bar.setProgress(value); percent.setText(getString(R.string.export_percent,value)); } })); return true; } catch(Exception e) { deleteImageDocument(uri); throw e; } },ok -> { downloading=false; clearSingleImage(job); saving.dialog.dismiss(); toast("本页图片已保存"); },e -> { downloading=false; clearSingleImage(job); saving.dialog.dismiss(); toast(job.getAsBoolean()?"已取消保存":"图片保存失败："+error(e)); });
     }
 
@@ -1063,7 +1498,7 @@ public class MainActivity extends Activity {
         final TextView headline,description,detail;
         final TextView[] stages=new TextView[3];
         final ProgressBar progress;
-        final Button action;
+        final ImageButton action;
         DownloadPanel(DownloadTask job,String title) {
             sheet=createSheet("保存课件",title);
             LinearLayout steps=row(); String[] labels={"1 获取页面","2 生成文件","3 保存文件"};
@@ -1073,7 +1508,7 @@ public class MainActivity extends Activity {
             description=text("正在准备课件页面",13,MUTED,false); description.setGravity(Gravity.CENTER); sheet.panel.addView(description); gap(sheet.panel,24);
             progress=new ProgressBar(MainActivity.this,null,android.R.attr.progressBarStyleHorizontal); progress.setMax(100); progress.setProgressTintList(ColorStateList.valueOf(GREEN)); progress.setProgressBackgroundTintList(ColorStateList.valueOf(PALE)); progress.setIndeterminateTintList(ColorStateList.valueOf(GREEN)); sheet.panel.addView(progress,lp(-1,8)); gap(sheet.panel,12);
             detail=text("",11,MUTED,false); detail.setGravity(Gravity.CENTER); sheet.panel.addView(detail); gap(sheet.panel,26);
-            action=button("取消保存",false,job::cancel); sheet.panel.addView(action);
+            action=sheet.close; action.setOnClickListener(v->{ job.cancel(); sheet.dialog.cancel(); });
             sheet.dialog.setCanceledOnTouchOutside(false); sheet.dialog.setOnCancelListener(d -> job.cancel()); showSheet(sheet);
         }
         void update(ExportProgress state) {
@@ -1089,15 +1524,14 @@ public class MainActivity extends Activity {
             progress.setIndeterminate(false); progress.setProgress(saved?100:0);
             headline.setText(saved?"保存完成":cancelled?"已取消保存":"保存失败"); description.setText(message); detail.setText(saved?"文件已保存到你选择的位置":cancelled?"未完成的文件已尝试清理":"可刷新课件后重新下载");
             for(TextView stage:stages) stage.setBackground(bg(saved?PALE:BG,10,0));
-            action.setEnabled(true); action.setText(saved?"完成":"关闭"); action.setOnClickListener(v -> sheet.dialog.dismiss());
+            action.setEnabled(true); action.setContentDescription("关闭保存课件"); action.setOnClickListener(v -> sheet.dialog.dismiss());
         }
     }
     @Override protected void onActivityResult(int request,int result,Intent data) {
         super.onActivityResult(request,result,data);
-        if(request==EXPORT_LOGS) {
-            if(result==RESULT_OK&&data!=null&&data.getData()!=null) { Uri destination=data.getData(); work(() -> { byte[] bytes=diagnostics.today(); if(bytes.length==0) throw new java.io.IOException("暂无可导出的诊断日志"); try(java.io.OutputStream output=getContentResolver().openOutputStream(destination,"wt")) { if(output==null) throw new java.io.IOException("无法保存日志"); output.write(bytes); } return true; },ok -> toast("诊断日志已导出")); }
-            return;
-        } if(request==SAVE_IMAGE) { singleImageResult(result,data); return; } if(request!=SAVE) return;
+        if(request==PICK_QUIZ_IMAGES){java.util.function.Consumer<List<Uri>> done=pendingQuizImages;pendingQuizImages=null;if(done!=null&&result==RESULT_OK&&data!=null){java.util.LinkedHashSet<Uri> unique=new java.util.LinkedHashSet<>();if(data.getData()!=null)unique.add(data.getData());if(data.getClipData()!=null)for(int i=0;i<data.getClipData().getItemCount()&&unique.size()<=AnswerImage.MAX_COUNT;i++)unique.add(data.getClipData().getItemAt(i).getUri());done.accept(new ArrayList<>(unique));}return;}
+        if(request==SCAN_LESSON) { scannedLessonResult(result,data); return; }
+        if(request==SAVE_IMAGE) { singleImageResult(result,data); return; } if(request!=SAVE) return;
         String format=pendingFormat; JSONObject p=exportPresentation; RainApi owner=pendingExportApi; int ownerEpoch=pendingExportEpoch; pendingFormat=null; exportPresentation=null; pendingExportApi=null;
         if(result!=RESULT_OK||data==null||data.getData()==null||format==null||p==null) return;
         Uri destination=data.getData();
@@ -1110,9 +1544,9 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() { if(exitingForUpdate) return; if(pendingUpdate!=null&&pendingUpdate.required(BuildConfig.VERSION_CODE)) { showPendingUpdate(); return; } if(checkingCredentials&&cancelEntryLookup!=null) { cancelEntryLookup.run(); return; } if(tab==1&&dynamicView==HISTORY_READER) { dynamicView=DETAIL; render(); } else if(tab==1&&dynamicView!=FEED) showFeed(); else if(tab!=0) { tab=0; render(); } else super.onBackPressed(); }
-    @Override protected void onStart() { super.onStart(); checkForUpdates(false); }
-    @Override protected void onStop() { flushActivityCache(); super.onStop(); }
-    @Override protected void onDestroy() { if(humanVerificationDialog!=null) humanVerificationDialog.dismiss(); if(loginDialog!=null) loginDialog.dismiss(); if(updateChecker!=null) updateChecker.close(); updateIo.shutdownNow(); if(updateDialog!=null) updateDialog.dismiss(); if(qrController!=null) qrController.close(); if(diagnostics!=null) diagnostics.close(); if(cancelEntryLookup!=null) cancelEntryLookup.run(); flushActivityCache(); feedIo.shutdown(); loginEpoch++; accountEpoch++; cancelLocationFlow(); if(fullDialog!=null) fullDialog.dismiss(); if(imageJob!=null) imageJob.cancel(); pendingImage=null; if(api!=null) api.cancel(); workers.shutdownNow(); ui.removeCallbacksAndMessages(null); super.onDestroy(); }
+    @Override protected void onStart() { super.onStart(); foreground=true; updateClassroomRetry(); if(quizDialog!=null) quizDialog.foreground(true); checkForUpdates(false); }
+    @Override protected void onStop() { foreground=false; stopLocationSync();stopClassroomRetry(); if(quizDialog!=null) quizDialog.foreground(false); flushActivityCache(); super.onStop(); }
+    @Override protected void onDestroy() { if(aiSettingsDialog!=null) aiSettingsDialog.close(); foreground=false; stopClassroomRetry(); classroomConnectionRevision++; closeQuiz(); lessonQuiz=null; if(batchCheckin!=null) batchCheckin.close(); if(dynamicCredentialLookup!=null) dynamicCredentialLookup.set(true); if(cookieDialog!=null) cookieDialog.dismiss(); if(humanVerificationDialog!=null) humanVerificationDialog.dismiss(); if(loginDialog!=null) loginDialog.dismiss(); if(updateChecker!=null) updateChecker.close(); updateIo.shutdownNow(); if(updateDialog!=null) updateDialog.dismiss(); if(qrController!=null) qrController.close(); if(cancelEntryLookup!=null) cancelEntryLookup.run(); flushActivityCache(); feedIo.shutdown(); loginEpoch++; accountEpoch++; cancelLocationFlow(); if(fullDialog!=null) fullDialog.dismiss(); if(imageJob!=null) imageJob.cancel(); pendingImage=null; if(api!=null) api.cancel(); workers.shutdownNow(); ui.removeCallbacksAndMessages(null); super.onDestroy(); }
     /** Consistent stroke icons, no font-dependent emoji or mismatched symbol baselines. */
     private static class Icon extends View {
         final int kind,color; final Paint paint=new Paint(3); final RectF rect=new RectF();

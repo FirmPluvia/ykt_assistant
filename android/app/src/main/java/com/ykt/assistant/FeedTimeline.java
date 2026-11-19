@@ -22,6 +22,16 @@ final class FeedTimeline {
         }
         if(front.endReached) tails.clear(); return new FeedTimeline(front,tails);
     }
+    /** Local search may include disconnected cache segments without changing the pagination cursor. */
+    List<ActivityFeed.Entry> cachedEntries() {
+        java.util.Map<String,ActivityFeed.Entry> entries=new java.util.LinkedHashMap<>();
+        for(ActivityFeed.Entry entry:visible.entries) entries.put(ActivityFeed.key(entry),entry);
+        for(ActivityFeed segment:deferred) for(ActivityFeed.Entry entry:segment.entries)
+            entries.putIfAbsent(ActivityFeed.key(entry),entry);
+        List<ActivityFeed.Entry> sorted=new ArrayList<>(entries.values());
+        sorted.sort(java.util.Comparator.comparingLong(ActivityFeed.Entry::created).reversed());
+        return sorted;
+    }
     JSONObject encode() throws Exception { JSONArray tails=new JSONArray(); for(ActivityFeed tail:deferred) tails.put(tail.encode()); return RainApi.object("visible",visible.encode(),"deferred",tails); }
     static FeedTimeline decode(JSONObject data) throws Exception { ActivityFeed front=ActivityFeed.decode(data.getJSONObject("visible")); JSONArray tails=data.getJSONArray("deferred"); List<ActivityFeed> old=new ArrayList<>(); for(int i=0;i<tails.length();i++) old.add(ActivityFeed.decode(tails.getJSONObject(i))); return new FeedTimeline(front,old); }
 }

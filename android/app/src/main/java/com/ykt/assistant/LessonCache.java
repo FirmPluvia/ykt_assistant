@@ -18,10 +18,10 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/** Account/server/lesson-scoped encrypted credentials, with persisted logout revocation. */
+/** Permanent account/server/lesson-scoped encrypted credentials; logout revokes clients, not files. */
 final class LessonCache {
     interface Crypto { byte[] seal(byte[] plain,byte[] aad) throws Exception; byte[] open(byte[] encoded,byte[] aad) throws Exception; }
-    static final long MAX_AGE=24L*60*60*1000;
+    private final java.util.concurrent.atomic.AtomicLong generation=new java.util.concurrent.atomic.AtomicLong();
     final File directory;
     private final SharedPreferences prefs;
     private final Crypto crypto;
@@ -31,32 +31,30 @@ final class LessonCache {
     LessonCache(File dir,SharedPreferences prefs,Crypto crypto,LongSupplier clock) { directory=dir; this.prefs=prefs; this.crypto=crypto; this.clock=clock; }
     static File privateRoot(Context context) { File external=context.getExternalFilesDir(null); return external==null?context.getFilesDir():external.getParentFile(); }
     private long epoch() { return prefs.getLong("epoch",0); }
-    void revoke() { prefs.edit().putLong("epoch",epoch()+1).apply(); }
-    void purgeRevoked() { synchronized(lock) { File[] files=directory.listFiles(); if(files!=null) for(File f:files) if(!f.getName().startsWith(epoch()+"-")) f.delete(); } }
+    void revoke() { generation.incrementAndGet(); }
     RainApi.LessonStorage session() {
-        final long lease=epoch();
+        final long lease=generation.get(),storageEpoch=epoch();
         return new RainApi.LessonStorage() {
-            private String scope(String host,String uid,String lesson) { return lease+"|"+host+"|"+uid+"|"+lesson; }
-            private File file(String scope) throws Exception { byte[] hash=MessageDigest.getInstance("SHA-256").digest(scope.getBytes(StandardCharsets.UTF_8)); StringBuilder key=new StringBuilder(); for(byte b:hash) key.append(String.format(java.util.Locale.ROOT,"%02x",b&255)); return new File(directory,lease+"-"+key+".bin"); }
+            private String scope(String host,String uid,String lesson) { return storageEpoch+"|"+host+"|"+uid+"|"+lesson; }
+            private File file(String scope) throws Exception { byte[] hash=MessageDigest.getInstance("SHA-256").digest(scope.getBytes(StandardCharsets.UTF_8)); StringBuilder key=new StringBuilder(); for(byte b:hash) key.append(String.format(java.util.Locale.ROOT,"%02x",b&255)); return new File(directory,storageEpoch+"-"+key+".bin"); }
             @Override public JSONObject read(String host,String uid,String lesson) throws Exception {
                 synchronized(lock) {
-                    if(lease!=epoch()) return null; String scope=scope(host,uid,lesson); AtomicFile target=new AtomicFile(file(scope));
+                    if(lease!=generation.get()) return null; String scope=scope(host,uid,lesson); AtomicFile target=new AtomicFile(file(scope));
                     if(!target.getBaseFile().exists()) return null;
                     try {
                         JSONObject data=new JSONObject(new String(crypto.open(target.readFully(),scope.getBytes(StandardCharsets.UTF_8)),StandardCharsets.UTF_8));
-                        long age=clock.getAsLong()-data.getLong("savedAt");
-                        if(age<0||age>=MAX_AGE||!host.equals(data.getString("host"))||!uid.equals(data.getString("uid"))||!lesson.equals(data.getString("lesson"))||data.optString("bearer").isEmpty()||data.optString("lessonToken").isEmpty()) { target.delete(); return null; }
-                        return lease==epoch()?data:null;
-                    } catch(Exception e) { target.delete(); return null; }
+                        if(!host.equals(data.getString("host"))||!uid.equals(data.getString("uid"))||!lesson.equals(data.getString("lesson"))||data.optString("bearer").isEmpty()||data.optString("lessonToken").isEmpty()) { return null; }
+                        return lease==generation.get()?data:null;
+                    } catch(Exception e) { return null; }
                 }
             }
             @Override public void write(String host,String uid,String lesson,JSONObject credentials) throws Exception {
                 synchronized(lock) {
-                    if(lease!=epoch()) return; if(!directory.isDirectory()&&!directory.mkdirs()) throw new java.io.IOException("课堂缓存目录不可用");
+                    if(lease!=generation.get()) return; if(!directory.isDirectory()&&!directory.mkdirs()) throw new java.io.IOException("课堂缓存目录不可用");
                     String scope=scope(host,uid,lesson); JSONObject data=RainApi.object("host",host,"uid",uid,"lesson",lesson,"savedAt",clock.getAsLong(),"bearer",credentials.getString("bearer"),"lessonToken",credentials.getString("lessonToken"));
-                    byte[] encrypted=crypto.seal(data.toString().getBytes(StandardCharsets.UTF_8),scope.getBytes(StandardCharsets.UTF_8)); if(lease!=epoch()) return;
+                    byte[] encrypted=crypto.seal(data.toString().getBytes(StandardCharsets.UTF_8),scope.getBytes(StandardCharsets.UTF_8)); if(lease!=generation.get()) return;
                     AtomicFile target=new AtomicFile(file(scope)); FileOutputStream output=null;
-                    try { output=target.startWrite(); output.write(encrypted); target.finishWrite(output); if(lease!=epoch()) target.delete(); }
+                    try { output=target.startWrite(); output.write(encrypted); if(lease!=generation.get()) { target.failWrite(output); return; } target.finishWrite(output); }
                     catch(Exception e) { if(output!=null) target.failWrite(output); throw e; }
                 }
             }

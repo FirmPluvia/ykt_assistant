@@ -38,22 +38,6 @@ public class RainApi implements AutoCloseable {
         void remove(String host,String uid,String lesson) throws Exception;
     }
     private LessonStorage lessonStorage;
-    private DiagnosticLog diagnosticLog;
-    private String diagnosticRound="startup";
-    void setDiagnostics(DiagnosticLog log,String round) { diagnosticLog=log; diagnosticRound=DiagnosticLog.label(round); if(log!=null) log.bind(diagnosticRound,base.host()); }
-    void trace(String phase,String result,int httpStatus,int businessCode,long elapsed) { DiagnosticLog log=diagnosticLog; if(log!=null) log.event(phase,diagnosticRound,result,httpStatus,businessCode,elapsed); }
-    void traceSession(String source) { traceCookies("QR_SESSION",base.resolve("/api/v3/user/login"),source); }
-    private void traceCookies(String phase,HttpUrl url,String source) { DiagnosticLog log=diagnosticLog; if(log==null) return; boolean session=false,csrf=false; for(Cookie cookie:jar.loadForRequest(url)) { session|=cookie.name().equals("sessionid"); csrf|=cookie.name().equals("csrftoken"); } log.session(phase,diagnosticRound,session,csrf,source); }
-    private static String authPhase(String path) {
-        if(path.equals("/api/v3/user/login/pre-info")) return "QR_FETCH";
-        if(path.equals("/api/v3/user/login")) return "QR_WAIT";
-        if(path.equals("/v/course_meta/user_info")) return "PROFILE";
-        if(path.equals("/api/v3/user/login/app")) return "ACCOUNT_LOGIN";
-        if(path.equals("/api/v3/user/code/send")) return "SMS_SEND";
-        if(path.equals("/api/v3/user/code/verify")) return "SMS_VERIFY";
-        if(path.startsWith("/api/v3/lesson/location-checkin/")) return "LOCATION";
-        return null;
-    }
     void configure(LessonStorage storage) { lessonStorage=storage; }
     private volatile String userAgent="Android",deviceBrand="Android",deviceVersion="Android";
     public void setUserAgent(String value) { userAgent=UserAgent.validate(value); }
@@ -65,7 +49,7 @@ public class RainApi implements AutoCloseable {
     }
     private final HttpUrl base;
     private final Jar jar;
-    private final CookieStorage storage;
+    private volatile CookieStorage storage;
     private final Object lifecycle=new Object();
     private final Object locationSubmitLock=new Object();
     private JSONObject locationEvent;
@@ -73,14 +57,16 @@ public class RainApi implements AutoCloseable {
     private final Set<String> submittedLocations=new java.util.HashSet<>();
     private int locationRound;
     private boolean locationEnded;
+    private final Set<String> rejectedLessons=ConcurrentHashMap.newKeySet();
     private final Set<Call> pending=ConcurrentHashMap.newKeySet();
-    private final OkHttpClient http,assets,locationHttp;
+    private final OkHttpClient http,assets,locationHttp,uploadHttp;
     private volatile JSONObject user;
     private volatile String lessonId,bearer,lessonToken,presentationId;
     private volatile int livePage=1;
     private volatile boolean closed;
     private volatile String storageError;
     private WebSocket socket;
+    private volatile boolean socketConnected,socketConnecting;
     private volatile int socketEpoch;
     public RainApi(int service,CookieStorage storage) throws Exception {
         this(HttpUrl.get("https://"+HOSTS[service]+"/"),storage);
@@ -93,16 +79,33 @@ public class RainApi implements AutoCloseable {
         http=transport.cookieJar(jar).followRedirects(false).followSslRedirects(false)
             .connectTimeout(20,TimeUnit.SECONDS).readTimeout(40,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).pingInterval(25,TimeUnit.SECONDS).build();
         locationHttp=http.newBuilder().retryOnConnectionFailure(false).build();
-        assets=http.newBuilder().cookieJar(CookieJar.NO_COOKIES).callTimeout(30,TimeUnit.SECONDS).build();
+        assets=http.newBuilder().cookieJar(CookieJar.NO_COOKIES).callTimeout(30,TimeUnit.SECONDS).build();uploadHttp=assets.newBuilder().retryOnConnectionFailure(false).callTimeout(90,TimeUnit.SECONDS).build();
     }
     public String host() { return base.host(); }
     public JSONObject user() { return user; }
     public String lesson() { return lessonId; }
     public String presentation() { return presentationId; }
     public int livePage() { return livePage; }
+    public boolean isClassroomConnected() { return socketConnected; }
+    public boolean isClassroomConnecting() { return socketConnecting; }
     public String storageWarning() { return storageError; }
     public boolean hasCookies() { return jar.hasCookies(); }
     public boolean isClosed() { return closed; }
+    String cookieSnapshot() throws Exception { synchronized(jar) { return jar.serialized(); } }
+    String loginCookieHeader() {
+        java.util.List<String> pairs=new java.util.ArrayList<>(); for(Cookie cookie:jar.loadForRequest(base.resolve("/v/course_meta/user_info"))) pairs.add(cookie.name()+"="+cookie.value()); return String.join("; ",pairs);
+    }
+    void importLoginCookies(String header) throws Exception {
+        java.util.List<Cookie> imported=LoginCookies.parse(base,header);
+        synchronized(jar) { if(closed) throw new Failure("登录会话已关闭",401); jar.cookies.clear(); for(Cookie cookie:imported) jar.cookies.put(jar.key(cookie),cookie); }
+        jar.saveFromResponse(base,java.util.Collections.emptyList());
+    }
+    void promoteSession(CookieStorage target) throws Exception {
+        synchronized(jar.persistLock) {
+            String snapshot; synchronized(jar) { if(closed||user==null) throw new Failure("登录验证尚未完成",401); snapshot=jar.serialized(); }
+            target.write(snapshot); storage=target; jar.storage=target;
+        }
+    }
     public void rememberLogin() throws Exception { if(closed) throw new Failure("登录会话已退出，请重新扫码",401); storage.authenticated(); }
     public boolean restoreLesson(String id) { return restoreLesson(id,() -> false); }
     boolean restoreLesson(String id,java.util.function.BooleanSupplier cancelled) {
@@ -111,7 +114,7 @@ public class RainApi implements AutoCloseable {
         try {
             JSONObject saved=cache.read(host(),account.optString("user_id"),id);
             if(saved==null) { return false; }
-            String httpToken=saved.getString("bearer"),wsToken=saved.getString("lessonToken"); if(httpToken.isEmpty()||wsToken.isEmpty()) return false;
+            String httpToken=saved.getString("bearer"),wsToken=saved.getString("lessonToken"); if(httpToken.isEmpty()||wsToken.isEmpty()||rejectedLessons.contains(id+"|"+httpToken)) return false;
             synchronized(this) { if(cancelled.getAsBoolean()||closed||user!=account) return false; disconnect(); synchronized(lifecycle) { if(cancelled.getAsBoolean()||closed||user!=account) return false; lessonId=id; bearer=httpToken; lessonToken=wsToken; presentationId=null; livePage=1; } }
             return true;
         } catch(Exception e) { return false; }
@@ -125,19 +128,13 @@ public class RainApi implements AutoCloseable {
             cache.write(host(),account.optString("user_id"),id,data); 
         } catch(Exception e) { storageError="课堂凭证未能保存，下次需重新入课"; }
     }
-    private void removeSavedLesson(String id) {
-        JSONObject account=user;
-        if(lessonStorage!=null&&account!=null&&id!=null) try { lessonStorage.remove(host(),account.optString("user_id"),id); } catch(Exception ignored) {}
-        
-    }
     private void invalidateLesson(String expectedId,String expectedBearer) {
-        JSONObject account=user;
+        if(expectedId!=null&&expectedBearer!=null) rejectedLessons.add(expectedId+"|"+expectedBearer);
         synchronized(this) {
             synchronized(lifecycle) {
                 if(java.util.Objects.equals(expectedId,lessonId)&&java.util.Objects.equals(expectedBearer,bearer)) { lessonId=null; bearer=null; lessonToken=null; presentationId=null; disconnect(); }
             }
         }
-        if(lessonStorage!=null&&account!=null&&expectedId!=null) try { lessonStorage.remove(host(),account.optString("user_id"),expectedId); } catch(Exception ignored) {}
         
     }
     private Call prepare(Request request,OkHttpClient client) throws IOException {
@@ -174,27 +171,37 @@ public class RainApi implements AutoCloseable {
         if(!path.startsWith("/")||path.startsWith("//")) throw new Failure("接口路径无效",400);
         HttpUrl url=base.resolve(path); if(url==null) throw new Failure("接口地址无效",400);
         Request.Builder r; String requestedLesson,requestedBearer;
-        synchronized(lifecycle) { if(expectedRound!=null&&expectedRound!=locationRound) throw new Failure("位置签到轮次已变化，请重新查询",409); if(expectedLesson!=null&&(!expectedLesson.equals(lessonId)||!java.util.Objects.equals(expectedBearer,bearer))) throw new Failure("课堂已切换，请重新查询位置签到",409); requestedLesson=lessonId; requestedBearer=bearer; r=headers(url,classroom); }
-        if(body!=null) r.post(RequestBody.create(body.toString(),JSON));
-        Call call=prepare(r.build(),expectedRound==null?http:locationHttp);
-        String phase=authPhase(path); long started=System.nanoTime(); if(phase!=null) { trace(phase,"REQUEST",0,0,0); traceCookies(phase,url,null); }
+        synchronized(lifecycle) { if(expectedRound!=null&&expectedRound!=locationRound) throw new Failure("位置签到轮次已变化，请重新查询",409); if(expectedLesson!=null&&(!expectedLesson.equals(lessonId)||!java.util.Objects.equals(expectedBearer,bearer))) throw new Failure("课堂已切换，请重新进入课堂",409); requestedLesson=lessonId; requestedBearer=bearer; r=headers(url,classroom); }
+        if(body!=null) {
+            RequestBody encoded=RequestBody.create(body.toString(),JSON);
+            if(path.startsWith("/api/v3/lesson/problem/")) {
+                // A manual answer must never be replayed by a transport follow-up (e.g. 503 Retry-After:0).
+                encoded=new RequestBody() {
+                    private final RequestBody delegate=RequestBody.create(body.toString(),JSON);
+                    @Override public okhttp3.MediaType contentType() { return delegate.contentType(); }
+                    @Override public long contentLength() throws java.io.IOException { return delegate.contentLength(); }
+                    @Override public void writeTo(okio.BufferedSink sink) throws java.io.IOException { delegate.writeTo(sink); }
+                    @Override public boolean isOneShot() { return true; }
+                };
+            }
+            r.post(encoded);
+        }
+        Call call=prepare(r.build(),expectedRound==null&&!path.startsWith("/api/v3/lesson/problem/")?http:locationHttp);
         try(Response response=call.execute()) {
-            if(phase!=null) trace(phase,"RESPONSE",response.code(),0,(System.nanoTime()-started)/1000000);
             if(response.code()==401||response.code()==403) { if(classroom) { invalidateLesson(requestedLesson,requestedBearer); throw new Failure("课堂凭证已失效，请返回首页重新进入课堂",response.code()); } throw new Failure("登录已失效或没有访问权限，请重新登录",response.code()); }
             if(!response.isSuccessful()) throw new Failure("雨课堂 HTTP "+response.code(),response.code());
             if(response.body()==null) throw new Failure("雨课堂返回空数据",502);
             String raw=new String(readLimit(response.body().byteStream(),16*1024*1024),java.nio.charset.StandardCharsets.UTF_8);
             JSONObject data;
             try { data=new JSONObject(raw); } catch(Exception e) { throw new Failure("雨课堂返回的数据格式无法解析",502); }
-            int code=data.optInt("code",0); if(phase!=null) trace(phase,code==0?"OK":"BUSINESS_ERROR",response.code(),code,(System.nanoTime()-started)/1000000);
-            if(code!=0) {
-                String message=code==50001?"扫码等待超时，请刷新二维码":code==50070?"此课堂需要老师的动态扫码签到，请使用官方雨课堂按要求入课":code==51203?"签到二维码已过期，请取得新的二维码":data.optString("msg","雨课堂业务错误 "+code);
+            int code=data.optInt("code",0); if(code!=0) {
+                String message=code==50001?"扫码等待超时，请刷新二维码":code==50070?"此课堂需要动态二维码，请返回首页使用扫码入课":code==51203?"签到二维码已过期，请取得新的二维码":data.optString("msg","雨课堂业务错误 "+code);
                 throw new Failure(message,code);
             }
             if(closed) throw new Failure("登录会话已退出，请重新扫码",401);
             return new Result(data,response.header("set-auth"));
-        } catch(java.net.SocketTimeoutException e) { if(phase!=null) trace(phase,"READ_TIMEOUT",0,504,(System.nanoTime()-started)/1000000); throw new Failure("连接雨课堂超时，请重试",504); }
-        catch(java.io.IOException e) { if(phase!=null) trace(phase,closed?"CANCELLED":e instanceof Failure?"REQUEST_REJECTED":"IO_ERROR",0,e instanceof Failure?((Failure)e).code:0,(System.nanoTime()-started)/1000000); throw e; }
+        } catch(java.net.SocketTimeoutException e) { throw new Failure("连接雨课堂超时，请重试",504); }
+        catch(java.io.IOException e) { throw e; }
         finally { pending.remove(call); }
     }
     public JSONObject profile() throws Exception {
@@ -257,7 +264,11 @@ public class RainApi implements AutoCloseable {
     }
     public JSONObject lessonInfo(String id) throws Exception { return report("/api/v3/classroom-report/student/lesson-info",id); }
     public JSONObject lessonDetail(String id) throws Exception { return report("/api/v3/classroom-report/student/detail",id); }
-    public JSONObject lessonReview(String id) throws Exception { return report("/api/v3/classroom-report/student/review",id); }
+    String resolveLessonQr(LessonQr.Payload payload) throws Exception {
+        if(payload.lessonId!=null) return payload.lessonId;
+        JSONObject data=call("/api/v3/app/scan",object("url",payload.url),false).json.optJSONObject("data");
+        String id=data==null?"":data.optString("value",""); if(!LessonQr.validId(id)) throw new Failure("二维码解析未返回有效课堂 ID，请重新扫码",502); return id;
+    }
     public void checkin(String id) throws Exception {
         require(id,"课堂 ID");
         Result result=call("/api/v3/lesson/checkin",object("source",21,"lessonId",id,"joinIfNotIn",true),false);
@@ -269,7 +280,7 @@ public class RainApi implements AutoCloseable {
                 lessonId=id; bearer=result.auth.replaceFirst("(?i)^Bearer\\s+",""); lessonToken=token; presentationId=null; livePage=1;
             }
         }
-        saveLesson();
+        rejectedLessons.removeIf(key -> key.startsWith(id+"|")); saveLesson();
     }
     public JSONObject locationStatus() throws Exception { return call("/api/v3/lesson/location-checkin/eligibility",null,true).json; }
     private LocationCheckin locationInfo(String id,String auth) throws Exception {
@@ -286,14 +297,16 @@ public class RainApi implements AutoCloseable {
     LocationCheckin locationInfo() throws Exception {
         String id,auth; synchronized(lifecycle) { id=lessonId; auth=bearer; } if(id==null||auth==null) throw new Failure("请先进入课堂",409); return locationInfo(id,auth);
     }
-    LocationCheckin submitServerLocation(LocationCheckin expected) throws Exception {
+    LocationCheckin submitServerLocation(LocationCheckin expected) throws Exception { return submitServerLocation(expected,expected==null?null:expected.point); }
+    LocationCheckin submitServerLocation(LocationCheckin expected,LocationCheckin.Point selected) throws Exception {
+        LocationCheckin.Point coordinates=LocationCoordinates.validate(selected);
         synchronized(locationSubmitLock) {
             String id,auth; synchronized(lifecycle) { id=lessonId; auth=bearer; }
-            if(expected==null||id==null||!id.equals(expected.lesson)) throw new Failure("课堂已切换，请重新查询位置签到",409);
+            if(expected==null||id==null||!id.equals(expected.lesson)) throw new Failure("课堂已切换，请重新进入课堂",409);
             LocationCheckin fresh=locationInfo(id,auth); if(fresh.signed) return fresh; fresh.requireAvailable();
             if(!fresh.sameTarget(expected)) throw new Failure("签到轮次或位置已变化，请重新查询确认",409);
             if(fresh.submitted) return fresh;
-            call("/api/v3/lesson/location-checkin/submit",object("lat",fresh.point.lat,"lng",fresh.point.lng,"lessonId",id,"source",54,"address",fresh.address),true,id,auth,fresh.round);
+            call("/api/v3/lesson/location-checkin/submit",object("lat",coordinates.lat,"lng",coordinates.lng,"lessonId",id,"source",54,"address",fresh.address),true,id,auth,fresh.round);
             synchronized(lifecycle) { submittedLocations.add(fresh.key()); }
             return locationInfo(id,auth);
         }
@@ -338,14 +351,62 @@ public class RainApi implements AutoCloseable {
         if(p.has("id")&&!id.equals(p.optString("id"))) throw new Failure("返回课件与所选课件不一致",409);
         p.put("id",id); return p;
     }
+    /** Question details from this lesson's WebSocket presentation references; does not change the reader. */
+    public JSONObject quizPresentation(String expectedLesson,String id) throws Exception {
+        require(id,"课件 ID"); String auth; synchronized(lifecycle) { if(!expectedLesson.equals(lessonId)||bearer==null) throw new Failure("课堂已变化，请重新打开题目",409); auth=bearer; }
+        HttpUrl url=base.resolve("/api/v3/lesson/presentation/fetch").newBuilder().addQueryParameter("presentation_id",id).build();
+        JSONObject data=call(url.encodedPath()+"?"+url.encodedQuery(),null,true,expectedLesson,auth).json.optJSONObject("data");
+        if(data==null||data.optJSONArray("slides")==null) throw new Failure("题目课件数据不完整",502);
+        if(data.has("id")&&!id.equals(data.optString("id"))) throw new Failure("题目课件不匹配",409);
+        return data;
+    }
+    private static JSONObject uploadJson(InputStream input)throws Exception{String raw=new String(readLimit(input,65536),java.nio.charset.StandardCharsets.UTF_8);try{return new JSONObject(raw);}catch(Exception e){throw new Failure("图片上传服务返回的数据无法解析",502);}}
+    HttpUrl answerUploadUrl(){return HttpUrl.get("https://upload.qiniup.com/");}
+    private static RequestBody oneShot(RequestBody body){return new RequestBody(){@Override public MediaType contentType(){return body.contentType();}@Override public long contentLength()throws IOException{return body.contentLength();}@Override public void writeTo(okio.BufferedSink sink)throws IOException{body.writeTo(sink);}@Override public boolean isOneShot(){return true;}};}
+    /** Token request uses this account; external multipart carries only the scoped upload token. */
+    public AnswerImage uploadAnswerImage(AnswerImage photo,java.util.function.BooleanSupplier stopped)throws Exception{
+        if(stopped.getAsBoolean())throw new Failure("图片上传已取消",409);
+        Request tokenRequest=headers(base.resolve("/pc/generate_qiniu_token"),false).tag(java.util.function.BooleanSupplier.class,stopped).post(oneShot(RequestBody.create(object("bucket_name","cms-attachment","expired_time",3600).toString(),JSON))).build();String token;
+        Call tokenCall=prepare(tokenRequest,locationHttp);try(Response response=tokenCall.execute()){
+            if(!response.isSuccessful()||response.body()==null)throw new Failure("获取图片上传凭证失败 HTTP "+response.code(),response.code());JSONObject data=uploadJson(response.body().byteStream());JSONObject value=data.optJSONObject("data");token=value==null?"":value.optString("token","");if(!data.optBoolean("success")||token.isEmpty())throw new Failure("未取得有效的图片上传凭证",502);
+        }finally{pending.remove(tokenCall);}
+        if(stopped.getAsBoolean())throw new Failure("图片上传已取消",409);byte[] bytes=photo.bytes();if(bytes.length==0||bytes.length>AnswerImage.MAX_BYTES)throw new Failure("图片大小无效",400);String key=System.currentTimeMillis()+"-"+java.util.UUID.randomUUID()+".jpg";
+        okhttp3.MultipartBody multipart=new okhttp3.MultipartBody.Builder().setType(okhttp3.MultipartBody.FORM).addFormDataPart("token",token).addFormDataPart("key",key).addFormDataPart("fname",key).addFormDataPart("file",key,RequestBody.create(bytes,MediaType.get("image/jpeg"))).build();
+        Request request=new Request.Builder().url(answerUploadUrl()).header("User-Agent",userAgent).header("Accept","application/json").tag(java.util.function.BooleanSupplier.class,stopped).post(oneShot(multipart)).build();Call upload=prepare(request,uploadHttp);
+        try(Response response=upload.execute()){
+            if(!response.isSuccessful()||response.body()==null)throw new Failure("图片上传失败 HTTP "+response.code(),response.code());JSONObject data=uploadJson(response.body().byteStream());if(data.has("success")&&!data.optBoolean("success")||!key.equals(data.optString("key")))throw new Failure("图片上传未确认成功",502);if(stopped.getAsBoolean())throw new Failure("图片上传已取消",409);return photo.uploaded("https://qn-scd1.yuketang.cn/"+key);
+        }finally{pending.remove(upload);}
+    }
+    public JSONObject submitAnswer(LessonQuiz.Submission submission) throws Exception {
+        String auth; synchronized(lifecycle) { if(!submission.lesson.equals(lessonId)||bearer==null) throw new Failure("课堂已变化，答案未提交",409); auth=bearer; }
+        JSONObject response=call(submission.retry?"/api/v3/lesson/problem/retry":"/api/v3/lesson/problem/answer",submission.payload(),true,submission.lesson,auth).json;
+        if(!response.has("code")||response.optInt("code",-1)!=0) throw new Failure("未收到明确的提交成功确认，请核对课堂答题记录后再重试",502);
+        return response;
+    }
+    private static JSONObject quizEvent(JSONObject event) throws Exception {
+        JSONObject out=new JSONObject();
+        for(String field:new String[]{"prob","limit","dt","extend"}) { Object v=event.opt(field); if(v instanceof String||v instanceof Number) out.put(field,v); }
+        return out;
+    }
+    private static void forwardQuiz(JSONObject raw,JSONObject normalized) throws Exception {
+        JSONObject problem=raw.optJSONObject("problem"); String op=raw.optString("op");
+        if(problem!=null&&(op.equals("unlockproblem")||op.equals("extendtime"))) normalized.put("problem",quizEvent(problem));
+        JSONArray timeline=raw.optJSONArray("timeline"); if(timeline!=null) {
+            JSONArray filtered=new JSONArray();
+            for(int i=0;i<timeline.length();i++) { JSONObject item=timeline.optJSONObject(i); if(item==null||!"problem".equals(item.optString("type"))) continue; JSONObject q=quizEvent(item); q.put("type","problem"); for(String field:new String[]{"pres","si"}) { Object v=item.opt(field); if(v instanceof String||v instanceof Number) q.put(field,v); } filtered.put(q); }
+            normalized.put("timeline",filtered);
+        }
+    }
     public synchronized void connect(Events events) throws Exception {
         if(lessonId==null||lessonToken==null||user==null) throw new Failure("请先签到进入课堂",409);
         disconnect(); final int epoch=socketEpoch; final String id=lessonId,token=lessonToken,httpToken=bearer,uid=user.optString("user_id");
         Request request=headers(base.resolve("/wsapp/"),false).build();
-        socket=http.newWebSocket(request,new WebSocketListener() {
+        socketConnecting=true;
+        try { socket=http.newWebSocket(request,new WebSocketListener() {
             private boolean active() { return !closed&&epoch==socketEpoch; }
             @Override public void onOpen(WebSocket ws,Response response) {
                 if(!active()) { ws.cancel(); return; }
+                socketConnected=true; socketConnecting=false;
                 
                 try { ws.send(object("op","hello","userid",uid,"role","student","auth",token,"lessonid",id).toString()); events.receive(object("op","connection","state","connected")); } catch(Exception ignored) {}
             }
@@ -354,7 +415,6 @@ public class RainApi implements AutoCloseable {
                 try {
                     JSONObject event=new JSONObject(text);
                     if(event.optInt("code",0)==401||event.optInt("code",0)==403) { invalidateLesson(id,httpToken); events.receive(object("op","connection","state","credentials-expired")); return; }
-                    if(event.optString("op").equals("lessonfinished")||event.optString("message").equals("lesson finished")) { removeSavedLesson(id); }
                     locationEvent(id,event);
                     String pres=event.optString("presentation","");
                     JSONArray timeline=event.optJSONArray("timeline");
@@ -362,15 +422,16 @@ public class RainApi implements AutoCloseable {
                     if(!pres.isEmpty()) presentationId=pres;
                     if(event.has("slideindex")) livePage=Math.max(1,event.optInt("slideindex",1));
                     JSONObject slide=event.optJSONObject("slide"); if(slide!=null&&slide.has("si")) livePage=Math.max(1,slide.optInt("si",1));
-                    events.receive(object("op",event.optString("op"),"presentationId",presentationId,"slide",livePage,"finished",event.optString("op").equals("lessonfinished")||event.optString("message").equals("lesson finished")));
+                    JSONObject normalized=object("op",event.optString("op"),"presentationId",presentationId,"slide",livePage,"finished",event.optString("op").equals("lessonfinished")||event.optString("message").equals("lesson finished")); forwardQuiz(event,normalized); events.receive(normalized);
                 } catch(Exception ignored) {}
             }
-            @Override public void onFailure(WebSocket ws,Throwable error,Response response) { if(active()) try { boolean denied=response!=null&&(response.code()==401||response.code()==403); if(denied) invalidateLesson(id,httpToken); events.receive(object("op","connection","state",denied?"credentials-expired":"error")); } catch(Exception ignored) {} }
-            @Override public void onClosed(WebSocket ws,int code,String reason) { if(active()) try { if(code==1008) invalidateLesson(id,httpToken); events.receive(object("op","connection","state",code==1008?"credentials-expired":"closed")); } catch(Exception ignored) {} }
-            @Override public void onClosing(WebSocket ws,int code,String reason) { ws.close(code,reason); }
-        });
+            @Override public void onFailure(WebSocket ws,Throwable error,Response response) { if(active()) try { socketConnected=false; socketConnecting=false; boolean denied=response!=null&&(response.code()==401||response.code()==403); if(denied) invalidateLesson(id,httpToken); events.receive(object("op","connection","state",denied?"credentials-expired":"error")); } catch(Exception ignored) {} }
+            @Override public void onClosed(WebSocket ws,int code,String reason) { if(active()) try { socketConnected=false; socketConnecting=false; if(code==1008) invalidateLesson(id,httpToken); events.receive(object("op","connection","state",code==1008?"credentials-expired":"closed")); } catch(Exception ignored) {} }
+            @Override public void onClosing(WebSocket ws,int code,String reason) { if(active()) { socketConnected=false; socketConnecting=false; } ws.close(code,reason); }
+        }); } catch(RuntimeException e) { socketConnecting=false; socketConnected=false; throw e; }
     }
     public synchronized void disconnect() {
+        socketConnected=false; socketConnecting=false;
         synchronized(lifecycle) { locationEvent=null; locationEventLesson=null; locationEnded=false; locationRound++; submittedLocations.clear(); }
         socketEpoch++;
         if(socket!=null) { try { socket.send(object("op","leavelesson","lessonid",lessonId).toString()); } catch(Exception ignored) {} socket.close(1000,"leave"); socket.cancel(); socket=null; }
@@ -410,9 +471,7 @@ public class RainApi implements AutoCloseable {
         Request.Builder request=new Request.Builder().url(url).header("User-Agent",userAgent);
         if(operation!=null) request.tag(java.util.function.BooleanSupplier.class,operation);
         if(sameOrigin(url)) { StringBuilder cookies=new StringBuilder(); for(Cookie c:jar.loadForRequest(url)) { if(cookies.length()>0) cookies.append("; "); cookies.append(c.name()).append('=').append(c.value()); } if(cookies.length()>0) request.header("Cookie",cookies.toString()); }
-        Call call=prepare(request.build(),assets); long imageStarted=System.nanoTime();
-        try(Response response=call.execute()) {
-            if(qr) trace("QR_IMAGE","RESPONSE",response.code(),0,(System.nanoTime()-imageStarted)/1000000);
+        Call call=prepare(request.build(),assets); try(Response response=call.execute()) {
             if(Arrays.asList(301,302,303,307,308).contains(response.code())) {
                 String next=response.header("Location"); if(next==null||redirects>=3) throw new Failure("课件图片重定向异常",502);
                 return resource(url.resolve(next),redirects+1,qr,operation);
@@ -441,14 +500,14 @@ public class RainApi implements AutoCloseable {
     }
     public void clearCookies() throws Exception { jar.clear(); }
     final class Jar implements CookieJar {
-        private final CookieStorage storage;
+        private volatile CookieStorage storage;
         private final Map<String,Cookie> cookies=new LinkedHashMap<>();
         Jar(CookieStorage storage) throws Exception {
             this.storage=storage;
             JSONArray saved=new JSONArray(storage.read());
             for(int i=0;i<saved.length();i++) {
                 JSONObject item=saved.getJSONObject(i); Cookie c=Cookie.parse(base,item.getString("raw"));
-                if(c!=null&&item.optLong("expires",Long.MAX_VALUE)>System.currentTimeMillis()) cookies.put(key(c),c);
+                if(c!=null&&item.optLong("expires",Long.MAX_VALUE)>System.currentTimeMillis()) { Cookie.Builder restored=new Cookie.Builder().name(c.name()).value(c.value()).path(c.path()).expiresAt(item.optLong("expires",c.expiresAt())); if(c.hostOnly()) restored.hostOnlyDomain(c.domain()); else restored.domain(c.domain()); if(c.secure()) restored.secure(); if(c.httpOnly()) restored.httpOnly(); c=restored.build(); cookies.put(key(c),c); }
             }
         }
         synchronized boolean hasCookies() { return !cookies.isEmpty(); }
@@ -465,7 +524,7 @@ public class RainApi implements AutoCloseable {
             }
             synchronized(persistLock) {
                 synchronized(this) { if(closed||version!=revision) return; }
-                try { storage.write(snapshot); } catch(Exception e) { storageError="会话仅保留在内存：本机加密存储失败"; trace("SESSION_STORE","FAILED",0,0,0); }
+                try { storage.write(snapshot); } catch(Exception e) { storageError="会话仅保留在内存：本机存储失败"; }
             }
         }
         @Override public synchronized List<Cookie> loadForRequest(HttpUrl url) {
