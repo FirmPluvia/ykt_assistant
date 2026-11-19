@@ -32,7 +32,7 @@ user-agent: Android
 brand: google Pixel 9 Pro
 uuid:
 buildnumber: 1610
-xtua: client=app&tag=1.3.3&platform=Android
+xtua: client=app&tag=1.3.5&platform=Android
 systemversion: 16
 incremental: 14624737
 accept: application/json
@@ -817,7 +817,7 @@ set-auth: <bearerToken>
 | `3` | 投票 | 选项 key 数组，可选数量结合题目限制 |
 | `4` | 填空 | 按空位顺序排列的字符串数组 |
 | `5` | 主观题 | content、pics、videos 对象 |
-| `6` | 判断题编号 | 独立提交格式待确认；题目实际返回类型 1 时按单选提交 |
+| `6` | 判断题 | 原始选项 key 的单项数组，如 ["A"]；保留 problemType=6，未提供有效选项时不伪造布尔值 |
 
 主观题 result 示例：
 
@@ -1119,7 +1119,6 @@ lessonid 指定离开的课堂。离课确认消息格式待确认，不定义�
 | W04 | `slide` | 课堂翻页 |
 | W05 | `slidenav` | 另一种翻页消息 |
 | W06 | `extendtime` | 增加作答时间 |
-| W07 | `callpaused` | 随机点名事件 |
 | W08 | `showfinished` | 课件放映结束 |
 | W09 | `lessonfinished` | 课堂结束 |
 | W10 | `locationcheckinext` | 位置签到开始 |
@@ -1226,23 +1225,6 @@ slide.si 为实时页码，转换同 slide；它不是顶层 si。
 
 problem.extend 为增加的秒数，示例在剩余时间上加 30 秒，不是将总时限设为 30 秒。其他题目关联字段待确认。
 
-### W07. 随机点名事件
-
-**预期消息**
-
-```json
-{
-  "op": "callpaused",
-  "event": {
-    "code": "RANDOM_PICK",
-    "title": "示例随机点名事件",
-    "dt": 1700000000000
-  }
-}
-```
-
-event.code 为 RANDOM_PICK；event.title 为标题；event.dt 为事件毫秒时间。被点名人员名单结构待确认。
-
 ### W08. 课件放映结束
 
 **预期消息**
@@ -1324,7 +1306,7 @@ endedAt 为结束毫秒时间候选字段，其他兼容候选为 endMs、server
 | 字段 | 类型 | 含义 / 传值规则 |
 | --- | --- | --- |
 | `type` | string | 事件类型，已知 event、problem、slide |
-| `code` | string，若返回 | 事件码，如 RANDOM_PICK、SHOW_FINISH、LESSON_FINISH |
+| `code` | string，若返回 | 事件码，如 SHOW_FINISH、LESSON_FINISH |
 | `title` | string，若返回 | 事件标题 |
 | `dt` | integer | 事件 Unix 毫秒时间，题目时间可用于 A19 |
 | `si` | integer，若返回 | 关联页码/索引，各事件起点约定待确认 |

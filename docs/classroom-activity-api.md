@@ -1,6 +1,6 @@
-# 课堂动态与回顾接口（来自用户抓包，已脱敏）
+# 课堂动态与课件接口
 
-补充原 API 文档。样本来自长江雨课堂，包含 6 组请求 / 响应。本文件仅描述结构与调用关系，不保存 Cookie、用户姓名、学号、真实 ID、头像或图片签名。
+本文补充[雨课堂 API](rain-classroom-api.md)，汇总来自长江雨课堂的脱敏样本和当前应用使用的接口。
 
 这些接口使用登录账号 Cookie。抓包没有课堂 Authorization Bearer；查看报告不需要先调用签到接口。路径按当前选定雨课堂服务拼接。
 
@@ -17,8 +17,8 @@
 | 字段 | 样本含义 |
 | --- | --- |
 | `id` | 动态记录 ID |
-| `coursewareType` | 样本中全部为 `14`，表示课堂记录 |
-| `coursewareId` | 此类型中为单次课堂 ID，与报告的 lessonId 对应 |
+| `coursewareType` | `14` 表示课堂记录，`5` 表示作业 |
+| `coursewareId` | 课堂记录中为单次课堂 ID，与报告的 lessonId 对应 |
 | `coursewareTitle` | 课堂标题 |
 | `createTime` | 动态时间，样本为 Unix 毫秒 |
 | `courseId` / `courseName` | 课程 |
@@ -58,35 +58,17 @@
 | `checkInChannel` | 样本为“APP” |
 | `checkinSource` / `checkinTagCode` | 保留，未猜测缺勤 / 迟到等额外状态 |
 
-应用在 valid=1 且签到时间有效时显示“已签到”。按 2.4.1 的展示规则：课堂信息成功返回且结束时间已到、签到详情也成功返回但未确认签到时显示“未签到”；仍在上课 / 结束时间不明确时保留待确认，网络错误显示暂不可用。这个展示规则不是对官方全部签到枚举的推断。未确认记录不显示时间、方式、渠道占位项。
+应用在 valid=1 且签到时间有效时显示“已签到”。当前展示规则如下。课堂信息成功返回且结束时间已到、签到详情也成功返回但未确认签到时显示“未签到”；仍在上课 / 结束时间不明确时保留待确认，网络错误显示暂不可用。这个展示规则不是对官方全部签到枚举的推断。未确认记录不显示时间、方式、渠道占位项。
 
-`data.presentation` 为课件摘要数组：presentationId、title、cover、totalCount、problemCount、showPresentation 等。totalCount 是报告中的原课件页数，不等于回顾页数。
-
-## 回顾页面
-
-`GET /api/v3/classroom-report/student/review?lesson_id=<课堂ID>&front_time=<当前毫秒时间>`
-
-`data.timelineList` 含 type=slide 的翻页 / 动画记录。字段包括 id、presentationId、index、cover、visible、pres、si、sid、step、dt 等。
-
-- 按课件 ID 分组，按页面 ID 去重，同页使用最近的事件。
-- 去重后按 index / si 排序，保留“原第 N 页”信息，不把原页码当作数组索引。
-- 不展示最新事件明确 visible=false 的页面，也不从更早事件恢复它。
-- signed cover URL 按原值使用；通过账号重新请求回顾可取得更新地址。
-- 抓包共有 63 条翻页事件，仅 24 个唯一页面，涉及 2 份共 65 页的原课件。说明回顾不等于完整原始 PPT。
-- 应用可以预览和导出这些可见回顾页；未展示、未开放或未返回的页不补造。
-
-## 同时捕获但本版未使用
-
-- `/api/v3/classroom-report/lesson-extra`：digitalPen、vote、qrCodeState 等；没有把未知标志作为个人签到状态。
-- `/api/v3/classroom-report/replay`：课堂、录像及 presentations 等；本次需求不实现视频回放，也不推断空 timeLine 能补齐全部页面。
+`data.presentation` 为课件摘要数组：presentationId、title、cover、totalCount、problemCount、showPresentation 等。totalCount 是报告中的原课件页数。
 
 ## 夹具与验证
 
 `android/app/src/test/resources/captured-history-redacted.json` 仅保留响应 JSON 结构。所有标识、姓名、头像、时间和图片签名均已替换；请求头与原始抓包不进入源码包或 APK。
 
-回归测试覆盖最近动态关联、签到状态、重复动画去重、隐藏页、报告请求的 Cookie / Bearer 分离、界面列表 → 详情 → 回顾、退出清理，以及历史浏览不改变实时课堂凭证与翻页偏好。测试不使用抓包账号访问官方服务。
+回归测试覆盖动态和课堂关联、签到状态、原版课件可见页、报告请求认证及实时课堂凭证隔离。
 
-## 原版课件（2.4.4 修正）
+## 原版课件
 
 官方课堂报告页面源码确认了历史课件专用接口，与需要课堂 Bearer 的实时 /api/v3/lesson/presentation/fetch 不同。
 
@@ -97,7 +79,7 @@ GET /api/v3/classroom-report/student/ppt?lesson_id=<课堂 ID>&presentationId=<�
 - 响应 data.slideList 为原课件页面数组，包含 id、index、cover、visible、hasProblem 等字段。官方学生页面只展示 visible 为真值的页面；客户端采用同样规则，不从时间线补页或补图。
 - 兼容现有阅读和导出代码时映射成 slides；保持服务端原有顺序、图片地址和备注等字段。若没有学生可见页面则提示未开放，结构缺失 / 关联不符则报错。
 - 查看、刷新、PPTX 与 ZIP 使用同一份数据。原版指原课件页面；导出 PPTX 仍是页面图片生成。
-- 403 提示课件访问权限，401 才提示账号登录问题；不会回退到课堂回顾。
+- 403 提示课件访问权限，401 才提示账号登录问题。
 
 接口证据来自官方公开前端页面（2026-10-30 检查），未使用抓包中的账号访问课堂数据：
 
@@ -108,7 +90,7 @@ GET /api/v3/classroom-report/student/ppt?lesson_id=<课堂 ID>&presentationId=<�
 
 测试模拟官方接口结构，覆盖请求参数、无实时 Bearer、完整可见页、隐藏页、刷新、权限失败、结构缺失和课堂 / 课件关联检查；真实账号访问仍待设备确认。
 
-## 首页课堂入课（2.7.4）
+## 首页课堂入课
 
 首页点击正在上课课程不再调用 student/detail，也不拉取动态来判断签到状态。入课与动态报告展示完全分离：
 
@@ -119,3 +101,11 @@ GET /api/v3/classroom-report/student/ppt?lesson_id=<课堂 ID>&presentationId=<�
 5. 取消缓存读取、退出账号后，迟到读取结果不能恢复课堂状态或连接。
 
 student/detail 仍用于动态中的历史课堂与签到记录查看，不作为首页入课的前置条件。没有缓存不等于服务端未签到，界面只提示缺少本机凭证，不推断实际签到状态。
+
+## 课堂 ID 入课
+
+正在上课卡片可复制 `onLessonClassrooms[].lessonId`。首页手动输入课堂 ID 使用相同的凭证复用 / 确认签到流程，不依赖动态或签到报告查询。详见[课堂 ID 与手动入课](lesson-id-entry.md)。
+
+## 实时动态与多账号
+
+正在上课的动态记录在本机凭证命中时使用实时 presentation/fetch 接口，不使用历史 ppt 接口替代。账号选择、逐账号 checkin 与取消语义见[多账号说明](multiple-accounts.md)。
