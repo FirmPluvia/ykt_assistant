@@ -1,98 +1,13 @@
 # 雨课堂助手
 
-Android 8.0+ 原生直连客户端，版本 **3.2（versionCode 31）**。
+独立 Android 客户端，支持标准、荷塘、长江和黄河雨课堂。当前版本 **4.0（内部版本号 60）**，适用于 Android 8.0 及以上版本。
 
-## 两大核心
+| 功能 | 从哪里开始 |
+| --- | --- |
+| 签到、入课与旁听 | 首页点「查看课堂」、输入课堂 ID 或扫码入课。可复制本次课堂 ID 分享给好友，能否旁听由雨课堂服务端决定。[课堂 ID 入课](docs/lesson-id-entry.md) · [扫码入课](docs/lesson-qr-entry.md) |
+| 位置签到 | 进入课堂后点「查看位置签到状态」，可自定义经纬度再确认提交。[位置签到](docs/location-checkin.md) |
+| AI 答题 | 在「我的 → 配置 AI」填写接口、模型和 Key。在课堂题目中打开「AI 分析」，核对建议后手动提交。[AI 答题](docs/ai-quiz.md) · [课堂答题](docs/classroom-quiz.md) |
+| 动态与 PPT | 在「动态」按课程或类型筛选。课堂可查看签到和课件，支持保存单页、图片版 PPTX 或 ZIP。[动态查看与筛选](docs/activity-cache.md) · [课件查看与保存](docs/slides.md) |
+| 登录与多账号 | 支持二维码、账号密码、短信验证码及 Cookie。在「我的 → 账号管理」添加或切换账号，同服务器账号可同步签到和答题。[登录帮助](docs/account-login.md) · [账号管理](docs/multiple-accounts.md) · [同步请求](docs/request-sync.md) |
 
-### 1. 随时随地入课签到
-
-不用守着课堂页面，不用翻找课程——打开 App 就能入课、签到：
-
-- **首页优先显示正在上课的课程**，正在上的课排在最前面，一眼找到、一点就进。
-- **课堂凭证后台静默查询**：优先复用本地凭证，快速命中直接入课；只有超过 500ms 才显示可取消的等待提示，不卡界面。
-- **缺少凭证时确认签到并进入课堂**，签到、入课一步完成。
-- **返回、切换页面或退出账号**，会取消待显示提示和迟到入课，不留半截状态。
-- 支持标准、荷塘、长江、黄河四种雨课堂服务；二维码、手机号 / 邮箱密码、短信验证码登录，支持切换和取消。
-- 官方腾讯验证由用户手动完成，使用全屏容器适配高密度屏，密码和短信码不写入网页或日志。
-- 位置签到使用服务端返回的签到中心坐标，用户确认后提交、查询 signed 状态；无需手机定位权限，具有轮次隔离和防重复提交保护。
-
-### 2. 查看课堂动态
-
-课堂发生的事，随时打开就能看：
-
-- **动态首屏显示 10 条**；加载更多时优先展开连续缓存，再按原始游标请求后续记录，翻页不重复、不丢条。
-- **动态、课堂 / 签到详情、课件页信息按账号和服务器加密缓存**；账号注销时撤销并清理，不串号、不残留。
-- **实时 / 原版历史课件查看、刷新**；图片双指缩放、左右滑动和长按单页保存。
-- **在手机生成图片版 PPTX 和图片 ZIP**，支持保存进度和取消，课件直接带走。
-- 自定义 User-Agent，设备默认值读取实际 Android 版本、型号与 Build 编号。
-
-## 3.2 更新与功能整合
-
-已根据功能记录重建密码 / 短信登录、腾讯验证显示与服务端位置签到，不依赖旧 29 版源码；详见[功能重建说明](docs/integration-status.md)。
-
-- [二维码与诊断日志](docs/qr-login-3.2.md)
-- [账号密码、短信与官方验证](docs/account-login.md)
-- [服务端位置签到](docs/location-checkin.md)
-- [更新检测和配置](docs/update-check.md)
-
-## 其他说明
-
-- **GitHub 版同样启用有道云更新检测**，每次启动 / 返回前台静默检查，与自动登录和课程加载并行，无检测等待弹窗，保留强制更新规则。获取或解析配置失败时打开项目主页并退出，详见[更新说明](docs/update-check.md)。
-- 二维码失效立即撤下旧图，自动重新获取并退避重试；扫码授权后资料查询失败单独恢复，详见[二维码与日志](docs/qr-login-3.2.md)。
-- 手机直接连接雨课堂 HTTP / WebSocket，**无中继服务器、无演示账号**。仅腾讯官方安全验证使用隔离 WebView，课堂 / 动态页面和登录提交保持原生。
-
-## 包名说明
-
-GitHub 默认 applicationId / namespace 为 **`com.ykt.assistant`**。私有构建可传 `-PassistantApplicationId=starx.ykt.assistant` 保留原私有版安装包 ID；namespace 保持 com.ykt.assistant。覆盖安装必须同时保持原包名与相同签名。不同包名作为独立应用安装，数据不会自动迁移。
-
-## Release 说明
-
-Release 里**只上传开发者构建的 APK**，即作者自有签名版本的安装包，不附加其他构建产物。
-
-注意：GitHub 会给 Release 的 tag 自动生成源码压缩包下载项，那是 GitHub 的固定行为，不是作者上传的附件；Release 里作者手动上传的附件只有开发者构建的 APK 一个。
-
-## GitHub 构建
-
-将本仓库内容（包括 `.github` 隐藏目录）作为仓库根目录。推送 Android 源码、提交 PR 或在 Actions 中手动运行 **Build Android APK** 后，会执行单元测试、APK 构建与 Lint 检查。
-
-构建完成后，从该次运行的 **Artifacts → ykt_assistant-github-apk** 下载 APK。
-
-使用 Android 标准调试签名，不读取私有签名配置；不包含签名文件、密码或 GitHub Secrets。GitHub 托管 Runner 可能在不同运行中生成不同调试密钥，因此不同构建不保证可直接覆盖安装。需要固定签名发布时，可自行配置持久化签名，密钥应单独保管。
-
-## 本机构建
-
-准备 JDK 17、Android SDK 35、Build Tools 35.0.0、Gradle 8.10.2，然后运行：
-
-```sh
-cd android
-gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
-```
-
-也可使用项目自带 Gradle Wrapper（需 `android/gradle/wrapper/gradle-wrapper.jar` 在位）：
-
-```sh
-cd android
-./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
-```
-
-产物：`android/app/build/outputs/apk/debug/app-debug.apk`。本机 SDK 可通过 `ANDROID_HOME` 或未纳入源码的 `android/local.properties` 配置。
-
-`release` 默认不签名，需在构建后使用自己的签名文件签名；不会将私钥或密码写入 Gradle / GitHub 配置。私有包名构建命令：`gradle -PassistantApplicationId=starx.ykt.assistant :app:assembleRelease`。已移除所有原签名密钥及密码；应用版本名和版本号为 3.2 / 31。
-
-## 数据与隐私
-
-- Cookie 和课堂凭证通过 Android Keystore 加密保存，本地缓存优先位于 `Android/data/com.ykt.assistant/files/`；新增按日期保存的脱敏诊断日志，可在“我的”中主动导出。
-- 测试使用模拟接口与脱敏数据，不使用真实账号 Cookie；真机登录、Keystore 和课堂权限仍需在实际设备验证。
-- 本次完整重建版本通过 168 项测试及 Debug / Release Lint，Debug 与未签名 Release 均可构建。测试使用模拟接口，不代表已完成真实微信授权、短信下发或课堂签到验证。
-
-## 文档
-
-- [课堂与动态 API](docs/classroom-activity-api.md)
-- [课堂凭证存储](docs/local-storage.md)
-- [动态缓存](docs/activity-cache.md)
-- [User-Agent 与图片操作](docs/user-agent.md)
-- [雨课堂接口说明](docs/rain-classroom-api.md)
-
-## 许可
-
-本仓库暂未附 LICENSE 文件；使用、再分发前请以作者后续声明为准。
+[本机构建](android/README.md) · [维护交接](docs/HANDOFF.md) · [更新记录](CHANGELOG.md) · [安装包下载](https://share.feijipan.com/s/W6zjhil0)
