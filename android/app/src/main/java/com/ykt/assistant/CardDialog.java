@@ -18,25 +18,33 @@ import android.widget.ScrollView;
 
 /** Card close is a real cancellation, preserving cancellation and cleanup callbacks. */
 final class CardDialog extends Dialog {
+    private final int maxWidthDp;
     private ImageButton close;
     private boolean cancelAllowed=true;
     CardDialog(Context context) { this(context,520); }
     CardDialog(Context context,int maxWidthDp) {
         super(context);
+        this.maxWidthDp=maxWidthDp;
         Window window=getWindow();
         float density=context.getResources().getDisplayMetrics().density;
-        int horizontalMargin=Math.round(24*density);
         window.setBackgroundDrawableResource(android.R.color.transparent);
         window.setGravity(Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
         window.setWindowAnimations(R.style.CardWindowAnimation);
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         WindowManager.LayoutParams params=window.getAttributes();
-        params.width=Math.min(context.getResources().getDisplayMetrics().widthPixels-horizontalMargin,
-            Math.round(maxWidthDp*density));
-        params.height=ViewGroup.LayoutParams.WRAP_CONTENT;
         params.y=Math.round(12*density);
         params.dimAmount=.32f;
         window.setAttributes(params);
+    }
+    @Override protected void onStart() {
+        super.onStart();
+        Window window=getWindow();
+        // Initializing the floating decor resets the window to wrap-content.
+        window.getDecorView();
+        android.util.DisplayMetrics metrics=getContext().getResources().getDisplayMetrics();
+        int horizontalMargin=Math.round(24*metrics.density);
+        int width=Math.min(Math.max(1,metrics.widthPixels-horizontalMargin),Math.round(maxWidthDp*metrics.density));
+        window.setLayout(width,ViewGroup.LayoutParams.WRAP_CONTENT);
     }
     @Override public void setContentView(View content) {
         FrameLayout card=new FrameLayout(getContext());
