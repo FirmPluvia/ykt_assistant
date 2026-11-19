@@ -1,0 +1,21 @@
+package com.ykt.assistant;
+import org.json.*;
+import org.junit.*;
+import okhttp3.*;
+import okhttp3.mockwebserver.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import static org.junit.Assert.*;
+public class AnswerImageApiTest {
+    MockWebServer rain,cdn;RainApi api;boolean flag=true,wrongKey,explicitFailure;int status=200;AtomicInteger uploads=new AtomicInteger();volatile Throwable dispatchError;
+    @Before public void setup()throws Exception{rain=new MockWebServer();cdn=new MockWebServer();rain.start();cdn.setDispatcher(new okhttp3.mockwebserver.Dispatcher(){@Override public MockResponse dispatch(RecordedRequest r){try{uploads.incrementAndGet();assertNull(r.getHeader("Cookie"));assertNull(r.getHeader("Authorization"));assertNull(r.getHeader("x-uid"));assertNull(r.getHeader("x-csrftoken"));assertEquals("Custom-UA",r.getHeader("User-Agent"));String body=r.getBody().readUtf8();assertTrue(body.contains("image/jpeg"));assertTrue(body.contains("private-upload-grant"));java.util.regex.Matcher matcher=java.util.regex.Pattern.compile("name=\"key\"\\r\\n(?:[^\\r\\n]+\\r\\n)*\\r\\n([^\\r]+)").matcher(body);assertTrue(matcher.find());String key=wrongKey?"wrong.jpg":matcher.group(1);try{JSONObject result=RainApi.object("key",key,"hash","hash");if(flag)result.put("success",!explicitFailure);return json(result.toString()).setResponseCode(status).setHeader("Retry-After","0");}catch(Exception e){throw new AssertionError(e);}}catch(Throwable e){dispatchError=e;return new MockResponse().setResponseCode(500);}}});cdn.start();api=new RainApi(rain.url("/"),new LoginCookies.Memory()){@Override HttpUrl answerUploadUrl(){return cdn.url("/");}};api.setUserAgent("Custom-UA");api.importLoginCookies("sessionid=own-cookie; csrftoken=own-csrf");rain.enqueue(json("{\"data\":{\"user_profile\":{\"user_id\":\"own\"}}}"));api.profile();rain.takeRequest();}
+    @After public void close()throws Exception{api.close();rain.close();cdn.close();if(dispatchError!=null)throw new AssertionError(dispatchError);}
+    MockResponse json(String s){return new MockResponse().setHeader("Content-Type","application/json").setBody(s);}
+    AnswerImage upload()throws Exception{rain.enqueue(json("{\"success\":true,\"data\":{\"token\":\"private-upload-grant\"}}"));return api.uploadAnswerImage(new AnswerImage("local",new byte[]{1,2,3},null),()->false);}
+    @Test public void tokenUsesAccountAndMultipartDoesNotLeakRainCredentials()throws Exception{AnswerImage image=upload();RecordedRequest token=rain.takeRequest();assertEquals("/pc/generate_qiniu_token",token.getPath());assertTrue(token.getHeader("Cookie").contains("own-cookie"));assertEquals("own",token.getHeader("x-uid"));assertNull(token.getHeader("Authorization"));assertEquals("cms-attachment",new JSONObject(token.getBody().readUtf8()).getString("bucket_name"));assertTrue(image.payload().getString("pic").startsWith("https://qn-scd1.yuketang.cn/"));assertTrue(image.payload().getString("thumb").endsWith("?imageView2/2/w/568"));assertEquals(1,uploads.get());}
+    @Test public void standardQiniuKeyAndHashWithoutSuccessFlagAreAccepted()throws Exception{flag=false;assertNotNull(upload().url);}
+    @Test public void falseTokenDoesNotContactCdn()throws Exception{rain.enqueue(json("{\"success\":false,\"data\":{\"token\":\"private\"}}"));try{api.uploadAnswerImage(new AnswerImage("a",new byte[]{1},null),()->false);fail();}catch(Exception e){assertFalse(e.getMessage().contains("private"));}assertEquals(0,uploads.get());}
+    @Test public void mismatchedKeyAndExplicitFailureAreRejected()throws Exception{wrongKey=true;try{upload();fail();}catch(RainApi.Failure expected){}wrongKey=false;explicitFailure=true;try{upload();fail();}catch(RainApi.Failure expected){}assertEquals(2,uploads.get());}
+    @Test public void uploadIsNotAutomaticallyReplayedOnRetryable503()throws Exception{status=503;try{upload();fail();}catch(RainApi.Failure expected){assertEquals(503,expected.code);}assertEquals(1,uploads.get());}
+    @Test public void cancelledOperationDoesNotRequestTokenOrUpload()throws Exception{try{api.uploadAnswerImage(new AnswerImage("a",new byte[]{1},null),()->true);fail();}catch(RainApi.Failure expected){}assertEquals(0,uploads.get());assertEquals(1,rain.getRequestCount());}
+}

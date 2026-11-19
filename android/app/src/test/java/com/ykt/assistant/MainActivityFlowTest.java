@@ -45,7 +45,7 @@ public class MainActivityFlowTest {
     @Before public void create() {
         Context app=RuntimeEnvironment.getApplication();
         app.getSharedPreferences("native_session",0).edit().clear().commit();
-        app.getSharedPreferences("native_preferences",0).edit().clear().commit();
+        app.getSharedPreferences("native_preferences",0).edit().clear().commit();app.getSharedPreferences("saved_accounts",0).edit().clear().commit();app.getSharedPreferences("request_sync",0).edit().clear().commit();
         controller=Robolectric.buildActivity(TestActivity.class).setup(); activity=controller.get(); ShadowLooper.idleMainLooper();
     }
     @After public void destroy() { if(controller!=null) controller.pause().stop().destroy(); ShadowLooper.idleMainLooper(); }
@@ -57,6 +57,7 @@ public class MainActivityFlowTest {
     private List<View> all(View root) { List<View> result=new ArrayList<>(); result.add(root); if(root instanceof ViewGroup) { ViewGroup group=(ViewGroup)root; for(int i=0;i<group.getChildCount();i++) result.addAll(all(group.getChildAt(i))); } return result; }
     private View find(View root,String label) { for(View v:all(root)) if(v instanceof TextView&&((TextView)v).getText().toString().equals(label)) return v; return null; }
     private void click(View root,String label) { View v=find(root,label); assertNotNull(label,v); assertTrue(label,v.performClick()); ShadowLooper.idleMainLooper(); }
+    private void closeCard(View root) { View close=root.findViewWithTag("card-close"); assertNotNull(close); assertTrue(close.performClick()); ShadowLooper.idleMainLooper(); }
     private void waitFor(BooleanSupplier condition) throws Exception { for(int i=0;i<150;i++) { ShadowLooper.idleMainLooper(); if(condition.getAsBoolean()) return; Thread.sleep(20); } fail("async flow did not finish"); }
     private boolean loading() { try { return (Boolean)get("loadingCourses"); } catch(Exception e) { throw new RuntimeException(e); } }
     private MockResponse response(String body) { return new MockResponse().setHeader("Content-Type","application/json").setBody(body); }
@@ -64,10 +65,16 @@ public class MainActivityFlowTest {
         server.enqueue(response("{\"data\":[{\"course_id\":\"math\",\"course_name\":\"数学课\"},{\"course_id\":\"english\",\"course_name\":\"英语课\"}]}"));
         server.enqueue(response("{\"code\":0,\"data\":{\"onLessonClassrooms\":"+(live?"[{\"courseId\":\"math\",\"lessonId\":\"lesson\"}]":"[]")+"}}"));
     }
+    @Test public void userAgentCardShowsOnlyDeviceSummaryButEditorKeepsTheFullHeader() throws Exception {
+        loggedIn(); String ua=UserAgent.defaultFor("17","AAP-AN00","HONORAAP-AN00"); activity.getSharedPreferences("native_preferences",0).edit().putString(UserAgent.KEY,ua).commit(); set("tab",2); call("render"); assertNotNull(find(root(),"YOUR OWN LEARNING SPACE")); assertNotNull(find(root(),"Android 17; AAP-AN00")); assertNull(find(root(),ua)); TextView edit=(TextView)find(root(),"修改"),cookie=(TextView)find(root(),"管理 Cookie"); assertEquals(edit.getLayoutParams().height,cookie.getLayoutParams().height); assertEquals(edit.getLayoutParams().width,cookie.getLayoutParams().width); click(root(),"修改"); Dialog settings=ShadowDialog.getLatestDialog(); EditText input=(EditText)all(settings.getWindow().getDecorView()).stream().filter(v->v instanceof EditText).findFirst().get(); assertEquals(ua,input.getText().toString());
+    }
+    @Test public void minePageShowsTipsBeforeAuthorWithoutRetiredFeatureEntries() throws Exception {
+        set("tab",2); call("render"); assertNotNull(find(root(),"账号管理")); assertNull(find(root(),"诊断日志")); assertNull(find(root(),"导出今日日志")); assertNull(find(root(),"查看随机点名记录")); java.util.List<View> views=all(root()); assertTrue(views.indexOf(find(root(),"使用小提示"))<views.indexOf(find(root(),"关于应用"))); assertTrue(views.indexOf(find(root(),"使用小提示"))<views.indexOf(find(root(),"作者 FirmPluvia"))); assertNotNull(find(root(),"雨课堂助手 "+BuildConfig.VERSION_NAME)); loggedIn(); call("render"); assertNotNull(find(root(),"管理 Cookie")); assertNull(find(root(),"诊断日志"));
+    }
     @Test public void logoutConfirmationClearsAccountAndReturnsToLoggedOutHome() throws Exception {
         loggedIn(); set("tab",2); call("render"); click(root(),"退出当前账号");
         Dialog dialog=ShadowDialog.getLatestDialog(); assertTrue(dialog.isShowing());
-        assertNotNull(find(dialog.getWindow().getDecorView(),"继续使用"));
+        assertNull(find(dialog.getWindow().getDecorView(),"继续使用")); assertNotNull(dialog.getWindow().getDecorView().findViewWithTag("card-close"));
         click(dialog.getWindow().getDecorView(),"退出登录");
         assertFalse(dialog.isShowing()); assertNull(get("user")); assertNull(get("catalog")); assertNull(get("presentation")); assertEquals(0,get("tab"));
         assertTrue(activity.getSharedPreferences("native_session",0).getBoolean("signed_out",false));
@@ -88,7 +95,7 @@ public class MainActivityFlowTest {
             queueCourses(server,true); call("loadCourses"); waitFor(() -> !loading());
             assertEquals(true,get("onlyLive")); assertNotNull(find(root(),"数学课")); assertNull(find(root(),"英语课"));
             queueCourses(server,false); call("loadCourses"); waitFor(() -> !loading());
-            assertEquals(false,get("onlyLive")); assertNotNull(find(root(),"数学课")); assertNotNull(find(root(),"英语课")); assertNull(find(root(),"正在上课")); assertNotNull(find(root(),"刷新课堂"));
+            assertEquals(false,get("onlyLive")); assertNotNull(find(root(),"数学课")); assertNotNull(find(root(),"英语课")); assertNotNull(find(root(),"正在上课")); assertNotNull(find(root(),"无")); assertEquals(1,all(root()).stream().filter(v->v instanceof TextView&&((TextView)v).getText().toString().equals("正在上课")).count()); assertNotNull(find(root(),"刷新课堂"));
         }
     }
     @Test public void failedRefreshKeepsCoursesAndDoesNotAccumulateErrorCards() throws Exception {
@@ -109,12 +116,66 @@ public class MainActivityFlowTest {
     }
     private void clickClassroom() throws Exception { Method m=MainActivity.class.getDeclaredMethod("confirmCheckin",CourseCatalog.Entry.class); m.setAccessible(true); m.invoke(activity,entryFixture()); }
     private boolean entryBusy() { try { return (Boolean)get("checkingCredentials")||(Boolean)get("joining"); } catch(Exception e) { throw new RuntimeException(e); } }
+    private boolean workBusy() { try { return (Integer)get("busyCount")>0; } catch(Exception e) { throw new RuntimeException(e); } }
+    private void returnClassroomScan(String value) { activity.onActivityResult(46,android.app.Activity.RESULT_OK,new Intent().putExtra(QrScanActivity.CONTENT,value)); }
+    @Test public void scanEntryIsBesideIdEntryAndOpensOnlyTheLocalScanner() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { installEntryApi(server); call("render"); View manual=find(root(),"使用课堂 ID 入课"),scan=find(root(),"扫码入课"); assertNotNull(manual); assertNotNull(scan); assertSame(manual.getParent(),scan.getParent()); assertEquals(manual.getLayoutParams().height,scan.getLayoutParams().height); click(root(),"扫码入课"); org.robolectric.shadows.ShadowActivity.IntentForResult next=Shadows.shadowOf(activity).getNextStartedActivityForResult(); assertEquals(46,next.requestCode); assertEquals(QrScanActivity.class.getName(),next.intent.getComponent().getClassName()); assertNull(Shadows.shadowOf(activity).getLastRequestedPermission()); activity.onActivityResult(46,android.app.Activity.RESULT_CANCELED,null); assertEquals(1,server.getRequestCount()); assertFalse((Boolean)get("scanningLesson")); }
+    }
+    @Test public void scanningDirectIdRequiresConfirmationBeforeCheckinAndPersistsCredentials() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); RainApiTest.Lessons cache=new RainApiTest.Lessons(); api.configure(cache); String id="1801803512884878080"; call("openLessonScanner"); returnClassroomScan(id); waitFor(()->!workBusy()&&!entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); assertNotNull(find(prompt.getWindow().getDecorView(),"课堂 ID："+id)); assertEquals(1,server.getRequestCount()); assertNull(api.lesson()); server.enqueue(response("{\"data\":{\"lessonToken\":\"scanner-ws\"}}").setHeader("set-auth","scanner-http")); server.enqueue(new MockResponse().withWebSocketUpgrade(new okhttp3.WebSocketListener() { @Override public void onClosing(okhttp3.WebSocket ws,int code,String reason) { ws.close(code,reason); } })); click(prompt.getWindow().getDecorView(),"签到并进入课堂"); waitFor(()->!workBusy()&&!entryBusy()); assertEquals(id,api.lesson()); assertEquals("/api/v3/lesson/checkin",server.takeRequest(3,TimeUnit.SECONDS).getPath()); assertNotNull(cache.read(api.host(),api.user().optString("user_id"),id)); api.close(); }
+    }
+    @Test public void dynamicScanPostsOriginalUrlThenPromptsWithoutAutomaticallyCheckingIn() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); String qr="https://www.yuketang.cn/api/v3/lesson/check-in/dynamic-qr-code?sig=a%2Fb%3D&time=1700000000"; server.enqueue(response("{\"data\":{\"value\":\"12345678\"}}")); call("openLessonScanner"); returnClassroomScan(qr); waitFor(()->!workBusy()&&!entryBusy()); okhttp3.mockwebserver.RecordedRequest scan=server.takeRequest(3,TimeUnit.SECONDS); assertEquals("/api/v3/app/scan",scan.getPath()); assertEquals(qr,new JSONObject(scan.getBody().readUtf8()).getString("url")); assertEquals(api.user().optString("user_id"),scan.getHeader("x-uid")); assertNull(scan.getHeader("Authorization")); assertNull(api.lesson()); assertEquals(2,server.getRequestCount()); assertNotNull(find(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"课堂 ID：12345678")); }
+    }
+    @Test public void expiredScanShowsRetryWithoutCreatingClassroomCredentials() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); server.enqueue(response("{\"code\":51203}")); call("openLessonScanner"); returnClassroomScan("https://www.yuketang.cn/api/v3/lesson/check-in/dynamic-qr-code?sig=expired"); waitFor(()->!workBusy()); Dialog failed=ShadowDialog.getLatestDialog(); assertNotNull(find(failed.getWindow().getDecorView(),"重新扫码")); assertNotNull(find(failed.getWindow().getDecorView(),"签到二维码已过期，请取得新的二维码")); assertNull(api.lesson()); assertEquals(2,server.getRequestCount()); }
+    }
+    @Test public void scanResultAfterAccountLogoutCannotEnterOrCheckIn() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { installEntryApi(server); call("openLessonScanner"); call("resetAccount"); returnClassroomScan("12345678"); assertNull(get("user")); assertNull(((RainApi)get("api")).lesson()); assertEquals(1,server.getRequestCount()); assertFalse((Boolean)get("resolvingLessonScan")); }
+    }
+    private EditText manualLessonInput(Dialog dialog) { for(View view:all(dialog.getWindow().getDecorView())) if(view instanceof EditText) return (EditText)view; throw new AssertionError("missing lesson input"); }
+    @Test public void liveCourseCopiesOnlyItsExactLessonIdWithoutRequestingEntry() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            RainApi api=installEntryApi(server); String id="1801803512884878080";
+            set("catalog",CourseCatalog.from(RainApi.object("courses",new JSONArray().put(RainApi.object("course_id","123","course_name","数学课")),"live",new JSONArray().put(RainApi.object("courseId","123","lessonId",id))))); call("render");
+            click(root(),"复制课堂 ID"); android.content.ClipboardManager clipboard=(android.content.ClipboardManager)activity.getSystemService(Context.CLIPBOARD_SERVICE); assertEquals(id,clipboard.getPrimaryClip().getItemAt(0).getText().toString()); assertNull(api.lesson()); assertEquals(1,server.getRequestCount());
+        }
+    }
+    @Test public void coursesWithoutLiveLessonsHaveManualEntryButNoCopyAction() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { installEntryApi(server); set("catalog",CourseCatalog.from(RainApi.object("courses",new JSONArray().put(RainApi.object("course_id","123","course_name","数学课")),"live",new JSONArray()))); call("render"); assertNull(find(root(),"复制课堂 ID")); assertNotNull(find(root(),"使用课堂 ID 入课")); }
+    }
+    @Test public void manualEntryRejectsEmptyNonNumericAndOversizeIdsWithoutNetwork() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            RainApi api=installEntryApi(server); call("openLessonIdEntry"); Dialog dialog=ShadowDialog.getLatestDialog(); EditText input=manualLessonInput(dialog);
+            for(String id:new String[]{"","0","000","12a","https://example.com/123","123456789012345678901"}) { input.setText(id); click(dialog.getWindow().getDecorView(),"继续入课"); assertTrue(dialog.isShowing()); assertNotNull(find(dialog.getWindow().getDecorView(),"请输入有效的数字课堂 ID（最多 20 位）")); }
+            assertNull(api.lesson()); assertEquals(1,server.getRequestCount()); closeCard(dialog.getWindow().getDecorView());
+        }
+    }
+    @Test public void manualIdRequiresConfirmationThenUsesOwnSessionAndCachesExactId() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            RainApi api=installEntryApi(server); RainApiTest.Lessons cache=new RainApiTest.Lessons(); api.configure(cache); String id="1801803512884878080";
+            call("render"); click(root(),"使用课堂 ID 入课"); Dialog input=ShadowDialog.getLatestDialog(); manualLessonInput(input).setText(id); click(input.getWindow().getDecorView(),"继续入课"); waitFor(() -> !entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); assertNotNull(find(prompt.getWindow().getDecorView(),"课堂 ID："+id)); assertNull(api.lesson()); assertEquals(1,server.getRequestCount());
+            server.enqueue(response("{\"data\":{\"lessonToken\":\"socket-fixture\"}}").setHeader("set-auth","http-fixture")); server.enqueue(new MockResponse().withWebSocketUpgrade(new okhttp3.WebSocketListener(){})); click(prompt.getWindow().getDecorView(),"签到并进入课堂"); waitFor(() -> !entryBusy());
+            okhttp3.mockwebserver.RecordedRequest request=server.takeRequest(5,TimeUnit.SECONDS); assertEquals("/api/v3/lesson/checkin",request.getPath()); JSONObject body=new JSONObject(request.getBody().readUtf8()); assertEquals(id,body.getString("lessonId")); assertEquals(21,body.getInt("source")); assertTrue(body.getBoolean("joinIfNotIn")); assertEquals(id,api.lesson()); assertNotNull(cache.read(api.host(),api.user().optString("user_id"),id)); assertEquals(2,get("dynamicView"));
+        }
+    }
+    @Test public void manualEntryRestoresSavedCredentialWithoutRepeatingCheckin() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            RainApi api=installEntryApi(server); RainApiTest.Lessons cache=new RainApiTest.Lessons(); api.configure(cache); String id="12345678"; cache.write(api.host(),api.user().optString("user_id"),id,RainApi.object("bearer","saved-http","lessonToken","saved-ws"));
+            server.enqueue(new MockResponse().withWebSocketUpgrade(new okhttp3.WebSocketListener(){})); call("openLessonIdEntry"); Dialog dialog=ShadowDialog.getLatestDialog(); manualLessonInput(dialog).setText(id); click(dialog.getWindow().getDecorView(),"继续入课"); waitFor(() -> !entryBusy()); assertEquals(id,api.lesson()); assertEquals("/wsapp/",server.takeRequest(5,TimeUnit.SECONDS).getPath()); assertEquals(2,server.getRequestCount()); assertFalse(dialog.isShowing());
+        }
+    }
+    @Test public void rejectedManualLessonDoesNotShowSuccessfulEntryOrSaveCredential() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            RainApi api=installEntryApi(server); RainApiTest.Lessons cache=new RainApiTest.Lessons(); api.configure(cache); call("openLessonIdEntry"); Dialog input=ShadowDialog.getLatestDialog(); manualLessonInput(input).setText("12345678"); click(input.getWindow().getDecorView(),"继续入课"); waitFor(() -> !entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); server.enqueue(new MockResponse().setResponseCode(403)); click(prompt.getWindow().getDecorView(),"签到并进入课堂"); waitFor(() -> !entryBusy()); assertNull(api.lesson()); assertNull(cache.read(api.host(),api.user().optString("user_id"),"12345678")); assertTrue(prompt.isShowing()); assertNotNull(find(prompt.getWindow().getDecorView(),"重试进入课堂")); assertEquals(0,get("tab")); assertEquals(2,server.getRequestCount());
+        }
+    }
     @Test public void missingLocalCredentialPromptsWithoutAnyReportOrCheckinRequest() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
             RainApi api=installEntryApi(server); clickClassroom(); waitFor(() -> !entryBusy());
             Dialog dialog=ShadowDialog.getLatestDialog(); View panel=dialog.getWindow().getDecorView(); assertNotNull(find(panel,"未找到课堂凭证")); assertNotNull(find(panel,"是否签到并进入课堂？")); assertNotNull(find(panel,"签到并进入课堂"));
             for(View v:all(panel)) assertFalse(v instanceof EditText);
-            assertEquals(1,server.getRequestCount()); click(panel,"暂不进入"); assertNull(api.lesson()); assertEquals(0,get("tab"));
+            assertEquals(1,server.getRequestCount()); closeCard(panel); assertNull(api.lesson()); assertEquals(0,get("tab"));
         }
     }
     @Test public void missingCredentialSignsInOnlyAfterExplicitConfirmationAndStoresCredential() throws Exception {
@@ -139,19 +200,19 @@ public class MainActivityFlowTest {
     }
     @Test public void unreadableLocalCredentialStillPromptsWithoutNetworkStatusLookup() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
-            RainApi api=installEntryApi(server); api.configure(new RainApiTest.Lessons() { @Override public JSONObject read(String h,String u,String l) throws Exception { throw new java.io.IOException("unreadable fixture"); } }); clickClassroom(); waitFor(() -> !entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); assertNotNull(find(prompt.getWindow().getDecorView(),"未找到课堂凭证")); assertNull(find(prompt.getWindow().getDecorView(),"重试查询")); assertNull(api.lesson()); assertEquals(1,server.getRequestCount()); click(prompt.getWindow().getDecorView(),"暂不进入");
+            RainApi api=installEntryApi(server); api.configure(new RainApiTest.Lessons() { @Override public JSONObject read(String h,String u,String l) throws Exception { throw new java.io.IOException("unreadable fixture"); } }); clickClassroom(); waitFor(() -> !entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); assertNotNull(find(prompt.getWindow().getDecorView(),"未找到课堂凭证")); assertNull(find(prompt.getWindow().getDecorView(),"重试查询")); assertNull(api.lesson()); assertEquals(1,server.getRequestCount()); closeCard(prompt.getWindow().getDecorView());
         }
     }
     @Test public void repeatedClickDuringLocalLookupDoesNotStartDuplicateLookupOrCheckin() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
             RainApi api=installEntryApi(server); CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1); java.util.concurrent.atomic.AtomicInteger reads=new java.util.concurrent.atomic.AtomicInteger(); api.configure(new RainApiTest.Lessons() { @Override public JSONObject read(String h,String u,String l) throws Exception { reads.incrementAndGet(); entered.countDown(); release.await(5,TimeUnit.SECONDS); return null; } });
-            try { clickClassroom(); assertTrue(entered.await(5,TimeUnit.SECONDS)); clickClassroom(); assertEquals(1,reads.get()); release.countDown(); waitFor(() -> !entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); assertNotNull(find(prompt.getWindow().getDecorView(),"未找到课堂凭证")); assertEquals(1,server.getRequestCount()); assertNull(api.lesson()); click(prompt.getWindow().getDecorView(),"暂不进入"); } finally { release.countDown(); }
+            try { clickClassroom(); assertTrue(entered.await(5,TimeUnit.SECONDS)); clickClassroom(); assertEquals(1,reads.get()); release.countDown(); waitFor(() -> !entryBusy()); Dialog prompt=ShadowDialog.getLatestDialog(); assertNotNull(find(prompt.getWindow().getDecorView(),"未找到课堂凭证")); assertEquals(1,server.getRequestCount()); assertNull(api.lesson()); closeCard(prompt.getWindow().getDecorView()); } finally { release.countDown(); }
         }
     }
     @Test public void cancellingLocalLookupCannotRestoreCredentialOrEnterClassroom() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
             RainApi api=installEntryApi(server); CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1); RainApiTest.Lessons cache=new RainApiTest.Lessons() { @Override public JSONObject read(String h,String u,String l) throws Exception { entered.countDown(); release.await(5,TimeUnit.SECONDS); return super.read(h,u,l); } }; api.configure(cache); cache.write(api.host(),api.user().optString("user_id"),"lesson",RainApi.object("bearer","saved-http","lessonToken","saved-ws"));
-            try { clickClassroom(); assertTrue(entered.await(5,TimeUnit.SECONDS)); ShadowLooper.idleMainLooper(600,TimeUnit.MILLISECONDS); Dialog waiting=ShadowDialog.getLatestDialog(); assertNotNull(waiting); click(waiting.getWindow().getDecorView(),"暂不进入"); release.countDown(); waitFor(() -> { try { return ((Integer)get("busyCount"))==0; } catch(Exception e) { return false; } }); assertNull(api.lesson()); assertEquals(0,get("tab")); assertFalse(entryBusy()); assertEquals(1,server.getRequestCount()); } finally { release.countDown(); }
+            try { clickClassroom(); assertTrue(entered.await(5,TimeUnit.SECONDS)); ShadowLooper.idleMainLooper(600,TimeUnit.MILLISECONDS); Dialog waiting=ShadowDialog.getLatestDialog(); assertNotNull(waiting); closeCard(waiting.getWindow().getDecorView()); release.countDown(); waitFor(() -> { try { return ((Integer)get("busyCount"))==0; } catch(Exception e) { return false; } }); assertNull(api.lesson()); assertEquals(0,get("tab")); assertFalse(entryBusy()); assertEquals(1,server.getRequestCount()); } finally { release.countDown(); }
         }
     }
     @Test public void downloadFormatSelectionLaunchesMatchingSystemSaveIntent() throws Exception {
@@ -192,6 +253,35 @@ public class MainActivityFlowTest {
         });
         ((RainApi)get("api")).cancel(); set("api",new RainApi(server.url("/"),new RainApiTest.Store(),transport)); loggedIn();
     }
+    private void setLiveCatalog() throws Exception { set("catalog",CourseCatalog.from(RainApi.object("courses",new JSONArray().put(RainApi.object("course_id","math","course_name","数学课")),"live",new JSONArray().put(RainApi.object("courseId","math","lessonId","lesson"))))); }
+    private void openLiveActivity() throws Exception { set("tab",1); Method method=MainActivity.class.getDeclaredMethod("openActivity",ActivityFeed.Entry.class); method.setAccessible(true); method.invoke(activity,new ActivityFeed.Entry(RainApi.object("coursewareType",14,"coursewareId","lesson","courseName","数学课","coursewareTitle","当前课"))); }
+    private java.util.concurrent.atomic.AtomicInteger installLiveDeckDispatcher(MockWebServer server) {
+        java.util.concurrent.atomic.AtomicInteger forbidden=new java.util.concurrent.atomic.AtomicInteger(); server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() { @Override public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest request) {
+            String path=request.getRequestUrl().encodedPath(); if(path.equals("/wsapp/")) return new MockResponse().withWebSocketUpgrade(new okhttp3.WebSocketListener() { @Override public void onMessage(okhttp3.WebSocket ws,String text) { try { if(new JSONObject(text).optString("op").equals("hello")) ws.send("{\"op\":\"hello\",\"presentation\":\"real-ppt\",\"timeline\":[]}"); } catch(Exception e) { throw new AssertionError(e); } } @Override public void onClosing(okhttp3.WebSocket ws,int code,String reason) { ws.close(code,reason); } });
+            if(path.equals("/api/v3/lesson/presentation/fetch")) { assertEquals("Bearer saved-http",request.getHeader("Authorization")); assertEquals("real-ppt",request.getRequestUrl().queryParameter("presentation_id")); return response("{\"data\":{\"id\":\"real-ppt\",\"title\":\"实时教学课件\",\"slides\":[]}}"); }
+            if(path.startsWith("/api/v3/classroom-report/")||path.equals("/api/v3/lesson/checkin")) forbidden.incrementAndGet(); return new MockResponse().setResponseCode(404);
+        } }); return forbidden;
+    }
+    private void seedLiveCredential(RainApi api) throws Exception { RainApiTest.Lessons cache=new RainApiTest.Lessons(); api.configure(cache); cache.write(api.host(),api.user().optString("user_id"),"lesson",RainApi.object("bearer","saved-http","lessonToken","saved-ws")); }
+    private boolean liveDeckReady() { try { JSONObject p=(JSONObject)get("presentation"); return p!=null&&p.optString("id").equals("real-ppt"); } catch(Exception e) { return false; } }
+    @Test public void liveActivityRestoresCredentialAndFetchesRealtimePptWithoutHistoryOrCheckin() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); seedLiveCredential(api); setLiveCatalog(); java.util.concurrent.atomic.AtomicInteger forbidden=installLiveDeckDispatcher(server); openLiveActivity(); waitFor(this::liveDeckReady); assertEquals(2,get("dynamicView")); assertNotNull(find(root(),"实时教学课件")); assertNull(find(root(),"查看随机点名记录")); assertEquals(0,forbidden.get()); assertEquals("lesson",api.lesson());  }
+    }
+    @Test public void homeClassroomLoadsLiveDeckWithoutAnySelectedActivity() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); seedLiveCredential(api); installLiveDeckDispatcher(server); assertNull(get("selectedActivity")); clickClassroom(); waitFor(this::liveDeckReady);  assertNull(get("selectedActivity")); }
+    }
+    @Test public void liveActivityWithoutCredentialFallsBackToReportWithoutAutomaticCheckin() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); setLiveCatalog(); server.enqueue(response("{\"data\":{\"lessonId\":\"lesson\",\"courseName\":\"数学课\"}}")); server.enqueue(response("{\"data\":{\"presentation\":[]}}")); openLiveActivity(); waitFor(()->!historyBusy()&&!workBusy()); assertEquals(1,get("dynamicView")); assertNull(api.lesson()); assertNotNull(find(root(),"进入实时课堂")); assertEquals(3,server.getRequestCount()); for(int n=0;n<2;n++) assertTrue(server.takeRequest(3,TimeUnit.SECONDS).getPath().startsWith("/api/v3/classroom-report/")); }
+    }
+    @Test public void leavingDynamicDuringCredentialReadCannotEnterClassroomLater() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); setLiveCatalog(); CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1); RainApiTest.Lessons cache=new RainApiTest.Lessons() { @Override public JSONObject read(String host,String uid,String lesson) throws Exception { entered.countDown(); release.await(3,TimeUnit.SECONDS); return RainApi.object("bearer","saved-http","lessonToken","saved-ws"); } }; api.configure(cache); server.enqueue(response("{\"data\":[]}")); openLiveActivity(); assertTrue(entered.await(3,TimeUnit.SECONDS)); call("showFeed"); release.countDown(); waitFor(()->!workBusy()&&!historyBusy()); assertNull(api.lesson()); assertEquals(0,get("dynamicView")); assertEquals(2,server.getRequestCount()); }
+    }
+    @Test public void liveReportCanIdentifyOngoingClassWhenHomeCatalogHasNotLoaded() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); seedLiveCredential(api); java.util.concurrent.atomic.AtomicInteger forbidden=installLiveDeckDispatcher(server); okhttp3.mockwebserver.Dispatcher live=server.getDispatcher(); server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() { @Override public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest request) throws InterruptedException { if(request.getRequestUrl().encodedPath().endsWith("/lesson-info")) return response("{\"data\":{\"lessonId\":\"lesson\",\"courseName\":\"数学课\",\"start\":1700000000000,\"end\":0}}"); if(request.getRequestUrl().encodedPath().endsWith("/detail")) return response("{\"data\":{\"presentation\":[]}}"); return live.dispatch(request); } }); assertNull(get("catalog")); openLiveActivity(); waitFor(this::liveDeckReady); assertEquals(2,get("dynamicView")); assertEquals(0,forbidden.get()); assertEquals("lesson",api.lesson()); }
+    }
+    @Test public void switchingTabsDuringDynamicCredentialReadCannotNavigateBackIntoReader() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { RainApi api=installEntryApi(server); setLiveCatalog(); CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1); api.configure(new RainApiTest.Lessons() { @Override public JSONObject read(String host,String uid,String lesson) throws Exception { entered.countDown(); release.await(3,TimeUnit.SECONDS); return RainApi.object("bearer","saved-http","lessonToken","saved-ws"); } }); openLiveActivity(); assertTrue(entered.await(3,TimeUnit.SECONDS)); View tab=find(root(),"课堂"); assertNotNull(tab); assertTrue(((View)tab.getParent()).performClick()); release.countDown(); waitFor(()->!workBusy()); assertEquals(0,get("tab")); assertNull(api.lesson()); assertEquals(1,server.getRequestCount()); }
+    }
     private boolean historyBusy() { try { return (Boolean)get("loadingActivities")||(Boolean)get("loadingReport")||(Boolean)get("loadingHistory")||!((java.util.Set<?>)get("attendanceLoading")).isEmpty(); } catch(Exception e) { throw new RuntimeException(e); } }
     @Test public void historyFeedOpensFullOriginalWithoutMutatingLiveLesson() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
@@ -226,10 +316,10 @@ public class MainActivityFlowTest {
     }
     @Test public void userAgentSettingsValidateSaveAndRestoreDeviceDefaultForRequests() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
-            RainApi api=installEntryApi(server); set("tab",2); call("render"); click(root(),"修改 User-Agent"); Dialog settings=ShadowDialog.getLatestDialog(); EditText input=(EditText)all(settings.getWindow().getDecorView()).stream().filter(v -> v instanceof EditText).findFirst().get(); assertEquals(UserAgent.deviceDefault(),input.getText().toString());
+            RainApi api=installEntryApi(server); set("tab",2); call("render"); click(root(),"修改"); Dialog settings=ShadowDialog.getLatestDialog(); EditText input=(EditText)all(settings.getWindow().getDecorView()).stream().filter(v -> v instanceof EditText).findFirst().get(); assertEquals(UserAgent.deviceDefault(),input.getText().toString());
             input.setText("bad\r\nInjected: value".replace("\\r","\r").replace("\\n","\n")); click(settings.getWindow().getDecorView(),"保存 User-Agent"); assertTrue(settings.isShowing()); assertFalse(activity.getSharedPreferences("native_preferences",0).contains(UserAgent.KEY));
             input.setText("StudyClient/1.0"); click(settings.getWindow().getDecorView(),"保存 User-Agent"); assertFalse(settings.isShowing()); assertEquals("StudyClient/1.0",activity.getSharedPreferences("native_preferences",0).getString(UserAgent.KEY,"")); assertSame(api,get("api")); assertFalse(api.isClosed()); server.enqueue(response("{\"data\":{\"user_profile\":{\"user_id\":\"fixture\"}}}")); api.profile(); assertEquals("StudyClient/1.0",server.takeRequest().getHeader("User-Agent"));
-            click(root(),"修改 User-Agent"); settings=ShadowDialog.getLatestDialog(); click(settings.getWindow().getDecorView(),"恢复设备默认"); assertFalse(activity.getSharedPreferences("native_preferences",0).contains(UserAgent.KEY)); server.enqueue(response("{\"data\":{\"user_profile\":{\"user_id\":\"fixture\"}}}")); api.profile(); assertEquals(UserAgent.deviceDefault(),server.takeRequest().getHeader("User-Agent"));
+            click(root(),"修改"); settings=ShadowDialog.getLatestDialog(); click(settings.getWindow().getDecorView(),"恢复设备默认"); assertFalse(activity.getSharedPreferences("native_preferences",0).contains(UserAgent.KEY)); server.enqueue(response("{\"data\":{\"user_profile\":{\"user_id\":\"fixture\"}}}")); api.profile(); assertEquals(UserAgent.deviceDefault(),server.takeRequest().getHeader("User-Agent"));
         }
     }
     private void swipeImage(ZoomImageView image,boolean left,long time) {
@@ -285,9 +375,9 @@ public class MainActivityFlowTest {
         try(MockWebServer server=new MockWebServer()) {
             installHistoryApi(server,false); set("presentation",RainApi.object("title","下载测试","slides",new JSONArray().put(RainApi.object("id","s","cover","https://fixture.yuketang.cn/a.png")))); call("downloadOptions");
             Dialog choose=ShadowDialog.getLatestDialog(); View panel=choose.getWindow().getDecorView(); assertTrue(((View)find(panel,"ZIP 页面图片").getParent().getParent()).performClick()); click(panel,"选择保存位置");
-            activity.onActivityResult(42,android.app.Activity.RESULT_OK,new Intent().setData(android.net.Uri.fromFile(file))); Dialog downloading=ShadowDialog.getLatestDialog(); assertNotNull(find(downloading.getWindow().getDecorView(),"取消保存"));
+            activity.onActivityResult(42,android.app.Activity.RESULT_OK,new Intent().setData(android.net.Uri.fromFile(file))); Dialog downloading=ShadowDialog.getLatestDialog(); assertNotNull(downloading.getWindow().getDecorView().findViewWithTag("card-close"));
             waitFor(() -> { try { return !(Boolean)get("downloading"); } catch(Exception e) { throw new RuntimeException(e); } });
-            assertNotNull(find(downloading.getWindow().getDecorView(),"保存完成")); assertNotNull(find(downloading.getWindow().getDecorView(),"完成")); assertTrue(file.length()>0); click(downloading.getWindow().getDecorView(),"完成");
+            assertNotNull(find(downloading.getWindow().getDecorView(),"保存完成")); assertNotNull(downloading.getWindow().getDecorView().findViewWithTag("card-close")); assertTrue(file.length()>0); closeCard(downloading.getWindow().getDecorView());
         } finally { file.delete(); }
     }
 
@@ -391,17 +481,13 @@ public class MainActivityFlowTest {
         }
     }
 
-    @Test public void diagnosticsCanBeExportedThroughTheSystemSaveFlow() throws Exception {
-        ((DiagnosticLog)get("diagnostics")).event("QR_WAIT",java.util.UUID.randomUUID().toString(),"BUSINESS_ERROR",200,50001,30_000); set("tab",2); call("render"); click(root(),"导出今日日志");
-        java.io.File file=java.io.File.createTempFile("diagnostic-export-",".log",activity.getCacheDir()); activity.onActivityResult(45,android.app.Activity.RESULT_OK,new Intent().setData(android.net.Uri.fromFile(file))); waitFor(() -> { try { return ((Integer)get("busyCount"))==0; } catch(Exception e) { return false; } });
-        String content=new String(java.nio.file.Files.readAllBytes(file.toPath()),java.nio.charset.StandardCharsets.UTF_8); assertTrue(content.contains("QR_WAIT")); assertTrue(content.contains("50001")); assertFalse(content.contains("sessionid=")); assertFalse(content.contains("csrftoken=")); file.delete();
-    }
+
 
     private final String locationFixture="{\"needLocationSignIn\":true,\"signed\":false,\"session\":{\"centerLat\":31.25,\"centerLng\":121.5},\"address\":\"教学楼\"}";
     private RainApi locationClass(MockWebServer server) throws Exception { RainApi api=installEntryApi(server); server.enqueue(response("{\"data\":{\"lessonToken\":\"ws\"}}").setHeader("set-auth","http")); api.checkin("lesson"); server.takeRequest(); set("tab",1); set("dynamicView",2); call("render"); return api; }
     private boolean locationBusy() { try { return (Boolean)get("checkingLocation")||(Boolean)get("locationSubmitting"); } catch(Exception e) { return false; } }
     @Test public void serverLocationNeedsConfirmationWithoutDeviceLocationPermission() throws Exception {
-        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); click(root(),"查看位置签到状态"); waitFor(()->!locationBusy()); Dialog sheet=(Dialog)get("locationDialog"); assertNotNull(sheet); assertNotNull(find(sheet.getWindow().getDecorView(),"将使用雨课堂返回的签到位置提交，不读取手机定位。")); assertNotNull(find(sheet.getWindow().getDecorView(),"31.250000, 121.500000")); assertEquals("GET",server.takeRequest().getMethod()); assertEquals(3,server.getRequestCount());
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); click(root(),"查看位置签到状态"); waitFor(()->!locationBusy()); Dialog sheet=(Dialog)get("locationDialog"); assertNotNull(sheet); assertNotNull(find(sheet.getWindow().getDecorView(),"默认使用课堂返回的坐标，可修改或在默认位置周围随机生成。")); assertNotNull(find(sheet.getWindow().getDecorView(),"31.250000, 121.500000")); assertEquals("GET",server.takeRequest().getMethod()); assertEquals(3,server.getRequestCount());
             server.enqueue(response(locationFixture)); server.enqueue(response("{\"code\":0}")); server.enqueue(response("{\"signed\":true}")); click(sheet.getWindow().getDecorView(),"确认位置签到"); waitFor(()->!locationBusy()); assertFalse(sheet.isShowing()); server.takeRequest(); assertEquals("POST",server.takeRequest().getMethod()); assertEquals("GET",server.takeRequest().getMethod()); assertNull(Shadows.shadowOf(activity).getLastRequestedPermission()); }
     }
     @Test public void pendingLocationRefreshNeverSubmitsTwice() throws Exception {
@@ -415,4 +501,116 @@ public class MainActivityFlowTest {
             try { call("checkLocation"); assertTrue(entered.await(3,TimeUnit.SECONDS)); call("resetAccount"); release.countDown(); waitFor(()->!locationBusy()); assertNull(get("locationDialog")); assertNull(get("user")); } finally { release.countDown(); } }
     }
 
+    @Test public void liveReaderExposesQuizAndLogoutDiscardsAccountDraftsAndSheet() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            server.start(); ((RainApi)get("api")).close(); RainApi owner=new QuizApiTest().joined(server); set("api",owner); set("user",owner.user()); set("tab",1); set("dynamicView",2);
+            JSONObject spec=RainApi.object("problemId","question","problemType",1,"body","课堂练习","options",new JSONArray("[{\"key\":\"A\",\"value\":\"选项\"}]"));
+            set("presentation",RainApi.object("id","pres","slides",new JSONArray().put(RainApi.object("problem",spec)))); call("render"); assertNotNull(find(root(),"课堂答题")); click(root(),"课堂答题");
+            LessonQuiz quiz=(LessonQuiz)get("lessonQuiz"); assertNotNull(quiz.get("question")); assertFalse(quiz.get("question").opened); Dialog sheet=ShadowDialog.getLatestDialog(); assertTrue(sheet.isShowing());
+            quiz.ingest(RainApi.object("op","unlockproblem","problem",RainApi.object("prob","question","dt",System.currentTimeMillis(),"limit",60))); ((ClassroomQuizDialog)get("quizDialog")).changed(); quiz.get("question").selected.add("A");
+            call("resetAccount"); assertFalse(sheet.isShowing()); assertNull(get("lessonQuiz")); assertNull(get("quizDialog"));
+        }
+    }
+    @Test public void customLocationCoordinatesAreSubmittedWithoutChangingTheServerTarget() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); call("checkLocation"); waitFor(()->!locationBusy()); server.takeRequest(); Dialog sheet=(Dialog)get("locationDialog"); View view=sheet.getWindow().getDecorView(); EditText lat=view.findViewWithTag("location-latitude"),lng=view.findViewWithTag("location-longitude"); assertEquals("31.250000",lat.getText().toString()); assertEquals("121.500000",lng.getText().toString()); lat.setText("-12.345678"); lng.setText("-123.456789");
+            server.enqueue(response(locationFixture)); server.enqueue(response("{\"code\":0}")); server.enqueue(response("{\"signed\":true}")); click(view,"确认位置签到"); waitFor(()->!locationBusy()); assertEquals("GET",server.takeRequest().getMethod()); JSONObject body=new JSONObject(server.takeRequest().getBody().readUtf8()); assertEquals(-12.345678,body.getDouble("lat"),0); assertEquals(-123.456789,body.getDouble("lng"),0); assertEquals(54,body.getInt("source")); assertEquals("lesson",body.getString("lessonId")); assertEquals("教学楼",body.getString("address")); assertEquals("GET",server.takeRequest().getMethod());
+        }
+    }
+    @Test public void invalidLocationInputDoesNotQueryOrSubmit() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); call("checkLocation"); waitFor(()->!locationBusy()); server.takeRequest(); Dialog sheet=(Dialog)get("locationDialog"); View view=sheet.getWindow().getDecorView(); EditText lat=view.findViewWithTag("location-latitude"); lat.setText("91"); click(view,"确认位置签到"); assertNotNull(find(view,"纬度须在 -90 到 90 之间")); assertNull(server.takeRequest(150,TimeUnit.MILLISECONDS)); assertFalse(locationBusy()); assertTrue(find(view,"确认位置签到").isEnabled()); }
+    }
+    @Test public void randomLocationStaysAroundDefaultAndResetRestoresBothFields() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server); server.enqueue(response(locationFixture)); call("checkLocation"); waitFor(()->!locationBusy()); server.takeRequest(); Dialog sheet=(Dialog)get("locationDialog"); View view=sheet.getWindow().getDecorView(); EditText lat=view.findViewWithTag("location-latitude"),lng=view.findViewWithTag("location-longitude"); lat.setText("0"); lng.setText("0");
+            for(int i=0;i<20;i++) { click(view,"随机 50 米"); LocationCheckin.Point q=LocationCoordinates.parse(lat.getText().toString(),lng.getText().toString()); assertTrue(LocationCoordinatesTest.distance(new LocationCheckin.Point(31.25,121.5),q)<=50); }
+            click(view,"恢复默认"); assertEquals("31.250000",lat.getText().toString()); assertEquals("121.500000",lng.getText().toString()); assertNull(server.takeRequest(150,TimeUnit.MILLISECONDS)); }
+    }
+    @Test public void longPressRandomRadiusValidatesPersistsAndUpdatesLocationButton() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { locationClass(server);server.enqueue(response(locationFixture));call("checkLocation");waitFor(()->!locationBusy());server.takeRequest();Dialog parent=(Dialog)get("locationDialog");View root=parent.getWindow().getDecorView();assertNotNull(find(root,"长按随机按钮修改距离 · 默认位置周围 50 米"));assertTrue(find(root,"随机 50 米").performLongClick());Dialog editor=ShadowDialog.getLatestDialog();EditText radius=editor.getWindow().getDecorView().findViewWithTag("location-random-radius");radius.setText("0");click(editor.getWindow().getDecorView(),"保存距离");assertTrue(editor.isShowing());radius.setText("500");click(editor.getWindow().getDecorView(),"保存距离");assertFalse(editor.isShowing());assertNotNull(find(root,"随机 500 米"));assertEquals("500",activity.getSharedPreferences("native_preferences",0).getString(LocationCoordinates.RADIUS_KEY,""));assertNull(server.takeRequest(150,TimeUnit.MILLISECONDS));
+            parent.dismiss();server.enqueue(response(locationFixture));call("checkLocation");waitFor(()->!locationBusy());assertNotNull(find(((Dialog)get("locationDialog")).getWindow().getDecorView(),"随机 500 米"));
+        }
+    }
+    @Test public void locationDismissalAlsoClosesRadiusEditor()throws Exception{
+        try(MockWebServer server=new MockWebServer()){locationClass(server);server.enqueue(response(locationFixture));call("checkLocation");waitFor(()->!locationBusy());Dialog parent=(Dialog)get("locationDialog");find(parent.getWindow().getDecorView(),"随机 50 米").performLongClick();Dialog child=ShadowDialog.getLatestDialog();parent.dismiss();ShadowLooper.idleMainLooper();assertFalse(child.isShowing());}
+    }
+    @Test public void entryCardHasHeaderXAndHidesSyncForSingleAccount()throws Exception{
+        try(MockWebServer server=new MockWebServer()){RainApi owner=installEntryApi(server);clickClassroom();waitFor(()->!entryBusy());Dialog sheet=ShadowDialog.getLatestDialog();View panel=sheet.getWindow().getDecorView();View close=panel.findViewWithTag("card-close");assertTrue(close instanceof android.widget.ImageButton);ViewGroup card=(ViewGroup)close.getParent().getParent();assertSame(close.getParent(),card.getChildAt(0));assertNull(find(panel,"暂不进入"));List<View> views=all(panel);assertNull(find(panel,"同时为其他账号签到入课"));assertNull(panel.findViewWithTag("sync-check:checkin"));closeCard(panel);assertFalse(sheet.isShowing());assertNull(owner.lesson());}
+    }
+    @Test public void joiningDisablesHeaderXAndFailureRestoresCancellation()throws Exception{
+        try(MockWebServer server=new MockWebServer()){installEntryApi(server);clickClassroom();waitFor(()->!entryBusy());Dialog sheet=ShadowDialog.getLatestDialog();View close=sheet.getWindow().getDecorView().findViewWithTag("card-close");CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);server.setDispatcher(new okhttp3.mockwebserver.Dispatcher(){public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest request){entered.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){Thread.currentThread().interrupt();}return new MockResponse().setResponseCode(500);}});
+            try{click(sheet.getWindow().getDecorView(),"签到并进入课堂");assertTrue(entered.await(3,TimeUnit.SECONDS));assertFalse(close.isEnabled());close.performClick();sheet.onBackPressed();ShadowLooper.idleMainLooper();assertTrue(sheet.isShowing());release.countDown();waitFor(()->{try{return !(Boolean)get("joining");}catch(Exception e){return false;}});assertTrue(close.isEnabled());closeCard(sheet.getWindow().getDecorView());assertFalse(sheet.isShowing());}finally{release.countDown();}
+        }
+    }
+    @Test public void progressHeaderXImmediatelyCancelsExportAndDoesNotReopenSheet()throws Exception{
+        java.io.File file=java.io.File.createTempFile("card-cancel-",".zip");CountDownLatch entered=new CountDownLatch(1);
+        try{((RainApi)get("api")).close();RainApi owner=new RainApi(okhttp3.HttpUrl.get("https://www.yuketang.cn/"),new RainApiTest.Store()){@Override public byte[] slideImage(JSONObject slide,java.util.function.BooleanSupplier stopped)throws Exception{entered.countDown();while(!stopped.getAsBoolean())Thread.sleep(5);throw new java.io.InterruptedIOException("cancelled");}};set("api",owner);loggedIn();set("presentation",RainApi.object("title","取消下载","slides",new JSONArray().put(RainApi.object("id","one"))));call("downloadOptions");Dialog picker=ShadowDialog.getLatestDialog();View options=picker.getWindow().getDecorView();((View)find(options,"ZIP 页面图片").getParent().getParent()).performClick();click(options,"选择保存位置");activity.onActivityResult(42,android.app.Activity.RESULT_OK,new Intent().setData(android.net.Uri.fromFile(file)));Dialog progress=ShadowDialog.getLatestDialog();assertTrue(entered.await(3,TimeUnit.SECONDS));Object job=get("activeDownload");progress.getWindow().getDecorView().findViewWithTag("card-close").performClick();Field state=job.getClass().getDeclaredField("cancelled");state.setAccessible(true);assertTrue(((java.util.concurrent.atomic.AtomicBoolean)state.get(job)).get());ShadowLooper.idleMainLooper();waitFor(()->{try{return !(Boolean)get("downloading");}catch(Exception e){return false;}});assertFalse(progress.isShowing());assertEquals(0,file.length());}finally{file.delete();}
+    }
+    @Test public void answerPhotoPickerUsesSystemDocumentGrantAndRoutesMultipleUrisOnce()throws Exception{
+        java.util.concurrent.atomic.AtomicReference<List<android.net.Uri>> received=new java.util.concurrent.atomic.AtomicReference<>();Method method=MainActivity.class.getDeclaredMethod("pickQuizImages",java.util.function.Consumer.class);method.setAccessible(true);method.invoke(activity,(java.util.function.Consumer<List<android.net.Uri>>)received::set);org.robolectric.shadows.ShadowActivity.IntentForResult pick=Shadows.shadowOf(activity).getNextStartedActivityForResult();assertEquals(Intent.ACTION_OPEN_DOCUMENT,pick.intent.getAction());assertEquals("image/*",pick.intent.getType());assertTrue(pick.intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE,false));android.content.ClipData clip=android.content.ClipData.newRawUri("images",android.net.Uri.parse("content://photos/1"));clip.addItem(new android.content.ClipData.Item(android.net.Uri.parse("content://photos/2")));Intent selected=new Intent();selected.setClipData(clip);activity.onActivityResult(pick.requestCode,android.app.Activity.RESULT_OK,selected);assertEquals(2,received.get().size());assertNull(get("pendingQuizImages"));received.set(null);activity.onActivityResult(pick.requestCode,android.app.Activity.RESULT_CANCELED,null);assertNull(received.get());
+    }
+    @Test public void emptyClassroomQuizOnlyShowsToastWithoutCreatingAnswerCard()throws Exception{
+        try(MockWebServer server=new MockWebServer()){locationClass(server);click(root(),"课堂答题");assertEquals("当前课堂未收到任何题目",org.robolectric.shadows.ShadowToast.getTextOfLatestToast());assertNull(get("quizDialog"));assertTrue(ShadowDialog.getShownDialogs().stream().noneMatch(Dialog::isShowing));assertEquals(2,server.getRequestCount());}
+    }
+    @Test public void locationCardOffersUncheckedSynchronizationOnlyForMultipleAccounts()throws Exception{
+        try(MockWebServer server=new MockWebServer()){locationClass(server);AccountStore store=new AccountStore(activity);store.remember(0,(JSONObject)get("user"),"[]");store.remember(0,RainApi.object("user_id","another","name","其他同学"),"[]");server.enqueue(response(locationFixture));call("checkLocation");waitFor(()->!locationBusy());Dialog sheet=(Dialog)get("locationDialog");View root=sheet.getWindow().getDecorView();android.widget.CheckBox sync=root.findViewWithTag("sync-check:checkin");assertNotNull(sync);assertEquals("同步位置签到",sync.getText().toString());assertFalse(sync.isChecked());assertNotNull(root.findViewWithTag("sync-edit:checkin"));sheet.dismiss();store.remove("0|another");server.enqueue(response(locationFixture));call("checkLocation");waitFor(()->!locationBusy());assertNull(((Dialog)get("locationDialog")).getWindow().getDecorView().findViewWithTag("sync-check:checkin"));}
+    }
+    @Test public void localFiltersCombineCourseAndTypeAcrossCachedSegmentsWithoutRequest() throws Exception {
+        try(MockWebServer server=new MockWebServer()) {
+            installEntryApi(server);
+            JSONArray old=new JSONArray().put(RainApi.object("id","old","coursewareType",14,
+                "coursewareId",12,"courseName","高等数学","coursewareTitle","旧课堂",
+                "createTime",1,"sort","old-cursor"));
+            JSONArray head=new JSONArray()
+                .put(RainApi.object("id","hw","coursewareType",5,"courseName","高等数学",
+                    "coursewareTitle","数学作业","createTime",3,"sort","hw-cursor"))
+                .put(RainApi.object("id","new","coursewareType",14,"coursewareId",13,
+                    "courseName","大学英语","coursewareTitle","英语课堂","createTime",2,"sort","new-cursor"));
+            FeedTimeline local=new FeedTimeline(ActivityFeed.from(old)).refresh(head);
+            set("activityTimeline",local);
+            set("activityFeed",local.visible);
+            set("tab",1);
+            call("showFeed");
+            assertNull(find(root(),"旧课堂"));
+            int requestCount=server.getRequestCount();
+            click(root(),"筛选动态");
+            View sheet=ShadowDialog.getLatestDialog().getWindow().getDecorView();
+            assertFalse(all(sheet).stream().anyMatch(v -> v instanceof EditText));
+            assertNull(find(sheet,"大学英语"));
+            ((android.widget.RadioButton)find(sheet,"作业")).setChecked(true);
+            click(sheet,"选择课程 · 全部课程");
+            Dialog picker=ShadowDialog.getLatestDialog();
+            View courseSheet=picker.getWindow().getDecorView();
+            assertNull(find(courseSheet,"大学英语"));
+            assertNotNull(find(courseSheet,"全部课程"));
+            click(courseSheet,"高等数学");
+            assertFalse(picker.isShowing());
+            assertNotNull(find(sheet,"选择课程 · 高等数学"));
+            click(sheet,"应用筛选");
+            assertNotNull(find(root(),"数学作业"));
+            assertNull(find(root(),"英语课堂"));
+            assertNull(find(root(),"旧课堂"));
+            click(root(),"筛选动态 · 作业 · 高等数学");
+            sheet=ShadowDialog.getLatestDialog().getWindow().getDecorView();
+            ((android.widget.RadioButton)find(sheet,"课堂")).setChecked(true);
+            click(sheet,"选择课程 · 高等数学");
+            picker=ShadowDialog.getLatestDialog();
+            courseSheet=picker.getWindow().getDecorView();
+            assertNotNull(find(courseSheet,"大学英语"));
+            assertTrue(find(courseSheet,"高等数学").isSelected());
+            courseSheet.findViewWithTag("card-close").performClick();
+            ShadowLooper.idleMainLooper();
+            assertFalse(picker.isShowing());
+            assertNotNull(find(sheet,"选择课程 · 高等数学"));
+            click(sheet,"应用筛选");
+            assertNotNull(find(root(),"旧课堂"));
+            assertNull(find(root(),"英语课堂"));
+            assertNull(find(root(),"数学作业"));
+            assertEquals("new-cursor",((ActivityFeed)get("activityFeed")).nextCursor);
+            assertEquals(requestCount,server.getRequestCount());
+            click(root(),"筛选动态 · 课堂 · 高等数学");
+            click(ShadowDialog.getLatestDialog().getWindow().getDecorView(),"清除筛选");
+            assertNotNull(find(root(),"数学作业"));
+            assertNull(find(root(),"旧课堂"));
+            assertEquals(requestCount,server.getRequestCount());
+        }
+    }
 }

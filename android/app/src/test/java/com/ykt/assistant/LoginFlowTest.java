@@ -87,9 +87,9 @@ public class LoginFlowTest {
     @Test public void openingAutomaticallyLoadsQrAndRefreshRequiresConfirmation() throws Exception {
         open(); waitFor(this::ready); assertEquals(1,firstQr.get()); RainApi original=LoginActivity.clients.get(0);
         click(panel(),"刷新二维码"); Dialog confirm=ShadowDialog.getLatestDialog(); assertNotNull(find(confirm.getWindow().getDecorView(),"刷新登录二维码？")); assertEquals(1,firstQr.get()); assertFalse(original.isClosed());
-        click(confirm.getWindow().getDecorView(),"继续扫码"); assertEquals(1,firstQr.get()); assertFalse(original.isClosed());
+        confirm.getWindow().getDecorView().findViewWithTag("card-close").performClick(); ShadowLooper.idleMainLooper(); assertEquals(1,firstQr.get()); assertFalse(original.isClosed());
         click(panel(),"刷新二维码"); confirm=ShadowDialog.getLatestDialog(); click(confirm.getWindow().getDecorView(),"确认刷新"); waitFor(this::ready); assertEquals(2,firstQr.get()); assertTrue(original.isClosed()); assertEquals(2,LoginActivity.clients.size());
-        click(panel(),"稍后再说"); assertTrue(LoginActivity.clients.get(1).isClosed()); assertNull(get("user")); assertNull(get("loginDialog"));
+        panel().findViewWithTag("card-close").performClick(); ShadowLooper.idleMainLooper(); assertTrue(LoginActivity.clients.get(1).isClosed()); assertNull(get("user")); assertNull(get("loginDialog"));
     }
     @Test public void serviceSwitchDuringFetchCancelsOldAttemptAndLoadsSelectedService() throws Exception {
         release=new CountDownLatch(1); open(); waitFor(() -> firstQr.get()==1); RainApi old=LoginActivity.clients.get(0);
@@ -105,8 +105,11 @@ public class LoginFlowTest {
         first.setDispatcher(dispatcher(firstQr,true)); open(); waitFor(() -> { try { return get("user")!=null; } catch(Exception e) { return false; } });
         assertNull(get("loginDialog")); assertFalse(LoginActivity.clients.get(0).isClosed()); assertSame(LoginActivity.clients.get(0),get("api")); assertFalse(activity.getSharedPreferences("native_session",0).getBoolean("signed_out",true));
     }
+    @Test public void qrCanSwitchToCookieLoginWithoutLeavingOldQrClientAlive() throws Exception {
+        open(); waitFor(this::ready); RainApi original=LoginActivity.clients.get(0); click(panel(),"Cookie 登录"); assertNull(get("loginDialog")); assertTrue(original.isClosed()); Dialog cookies=(Dialog)get("cookieDialog"); assertNotNull(cookies); assertNotNull(find(cookies.getWindow().getDecorView(),"使用 Cookie 登录")); assertNull(find(cookies.getWindow().getDecorView(),"复制 Cookie"));
+    }
     @Test public void qrCanSwitchToPasswordAndBackWithoutOldClientSurviving() throws Exception {
-        open(); waitFor(this::ready); RainApi original=LoginActivity.clients.get(0); click(panel(),"账号密码登录"); waitFor(()->LoginActivity.clients.size()==2); assertTrue(original.isClosed()); assertNotNull(find(panel(),"登录雨课堂")); click(panel(),"使用二维码登录"); waitFor(this::ready); assertTrue(LoginActivity.clients.size()>=3); assertTrue(LoginActivity.clients.get(1).isClosed()); assertNotNull(find(panel(),"刷新二维码"));
+        open(); waitFor(this::ready); RainApi original=LoginActivity.clients.get(0); click(panel(),"账号密码登录"); waitFor(()->LoginActivity.clients.size()==2); assertTrue(original.isClosed()); assertNotNull(find(panel(),"登录雨课堂")); assertNotNull(find(panel(),"使用其他方式登录")); assertNull(find(panel(),"使用二维码登录")); click(panel(),"二维码登录"); waitFor(this::ready); assertTrue(LoginActivity.clients.size()>=3); assertTrue(LoginActivity.clients.get(1).isClosed()); assertNotNull(find(panel(),"刷新二维码"));
     }
 
 }

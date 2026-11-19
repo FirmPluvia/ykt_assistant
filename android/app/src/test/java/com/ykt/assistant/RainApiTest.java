@@ -68,7 +68,7 @@ public class RainApiTest {
             CountDownLatch received=new CountDownLatch(1); List<JSONObject> hello=new ArrayList<>();
             s.enqueue(new MockResponse().withWebSocketUpgrade(new WebSocketListener() { @Override public void onMessage(WebSocket ws,String text) { try { JSONObject j=new JSONObject(text); if(j.optString("op").equals("hello")) { hello.add(j); ws.send("{\"op\":\"hello\",\"presentation\":\"pres&1\",\"slideindex\":3,\"auth\":\"never-forward\"}"); } } catch(Exception ignored) {} } }));
             List<JSONObject> events=new ArrayList<>(); api.connect(e -> { if(e.has("presentationId")) { events.add(e); received.countDown(); } });
-            assertTrue(received.await(10,TimeUnit.SECONDS)); assertEquals("ws-token",hello.get(0).getString("auth")); assertEquals("lesson",hello.get(0).getString("lessonid")); assertEquals("pres&1",api.presentation()); assertEquals(3,api.livePage()); assertFalse(events.toString().contains("never-forward"));
+            assertTrue(received.await(10,TimeUnit.SECONDS)); assertEquals("ws-token",hello.get(0).getString("auth")); assertEquals("lesson",hello.get(0).getString("lessonid")); assertTrue(api.isClassroomConnected()); assertFalse(api.isClassroomConnecting()); assertEquals("pres&1",api.presentation()); assertEquals(3,api.livePage()); assertFalse(events.toString().contains("never-forward"));
             RecordedRequest upgrade=s.takeRequest(); assertEquals("/wsapp/",upgrade.getPath()); assertNull(upgrade.getHeader("Authorization"));
             s.enqueue(response("{\"data\":{\"title\":\"课件\",\"slides\":[]}}")); api.fetchPresentation(); RecordedRequest fetch=s.takeRequest(); assertTrue(fetch.getPath().contains("presentation_id=pres%261")); assertEquals("Bearer http-token",fetch.getHeader("Authorization")); api.close();
         }
@@ -163,12 +163,11 @@ public class RainApiTest {
             JSONObject body=new JSONObject(activities.getBody().readUtf8()); assertEquals(10,body.getInt("size")); assertEquals(0,body.getJSONArray("type").length()); assertTrue(body.isNull("beginTime")); assertTrue(body.isNull("endTime"));
             server.enqueue(response("{\"code\":0,\"data\":{\"lessonId\":\"history&lesson\",\"presentationIds\":[\"pres\"]}}"));
             server.enqueue(response("{\"code\":0,\"data\":{\"detail\":{\"valid\":1,\"checkInTime\":1767225600000}}}"));
-            server.enqueue(response("{\"code\":0,\"data\":{\"timelineList\":[]}}"));
-            api.lessonInfo("history&lesson"); api.lessonDetail("history&lesson"); api.lessonReview("history&lesson");
-            for(String endpoint:new String[]{"lesson-info","detail","review"}) {
+            api.lessonInfo("history&lesson"); api.lessonDetail("history&lesson");
+            for(String endpoint:new String[]{"lesson-info","detail"}) {
                 RecordedRequest request=server.takeRequest(); assertEquals("GET",request.getMethod()); assertEquals("/api/v3/classroom-report/student/"+endpoint,request.getRequestUrl().encodedPath()); assertEquals("history&lesson",request.getRequestUrl().queryParameter("lesson_id")); assertTrue(Long.parseLong(request.getRequestUrl().queryParameter("front_time"))>1700000000000L); assertNull(request.getHeader("Authorization"));
             }
-            assertEquals("live-lesson",api.lesson()); assertEquals(5,server.getRequestCount()); api.close();
+            assertEquals("live-lesson",api.lesson()); assertEquals(4,server.getRequestCount()); api.close();
         }
     }
     @Test public void originalDeckUsesOfficialHistoryRouteAndStudentVisiblePagesWithoutLiveBearer() throws Exception {
@@ -254,7 +253,7 @@ public class RainApiTest {
     @Test public void rejectedCachedCredentialsAreRemovedWithoutSigningOutAccount() throws Exception {
         try(MockWebServer server=new MockWebServer()) {
             server.start(); Lessons lessons=new Lessons(); RainApi api=new RainApi(server.url("/"),new Store()); api.configure(lessons); profile(server); api.profile(); server.takeRequest(); lessons.write(api.host(),api.user().optString("user_id"),"lesson",RainApi.object("bearer","stale","lessonToken","stale")); assertTrue(api.restoreLesson("lesson"));
-            server.enqueue(new MockResponse().setResponseCode(401)); try { api.locationStatus(); fail(); } catch(RainApi.Failure e) { assertEquals(401,e.code); } assertNull(api.lesson()); assertNotNull(api.user()); assertFalse(api.restoreLesson("lesson")); assertTrue(lessons.records.isEmpty()); api.close();
+            server.enqueue(new MockResponse().setResponseCode(401)); try { api.locationStatus(); fail(); } catch(RainApi.Failure e) { assertEquals(401,e.code); } assertNull(api.lesson()); assertNotNull(api.user()); assertFalse(api.restoreLesson("lesson")); assertNotNull(lessons.read(api.host(),api.user().optString("user_id"),"lesson")); api.close();
         }
     }
     @Test public void delayedOldCredentialRejectionCannotClearNewClassroomCredentials() throws Exception {
@@ -266,8 +265,14 @@ public class RainApiTest {
                 return response("{\"data\":{\"lessonToken\":\"new-ws\"}}").setHeader("set-auth","new-http");
             } });
             try {
-                java.util.concurrent.Future<Integer> result=worker.submit(() -> { try { api.locationStatus(); return 0; } catch(RainApi.Failure e) { return e.code; } }); assertTrue(oldRequested.await(5,TimeUnit.SECONDS)); api.checkin("new"); release.countDown(); assertEquals(Integer.valueOf(401),result.get(5,TimeUnit.SECONDS)); assertEquals("new",api.lesson()); assertNotNull(cache.read(api.host(),api.user().optString("user_id"),"new")); assertNull(cache.read(api.host(),api.user().optString("user_id"),"old"));
+                java.util.concurrent.Future<Integer> result=worker.submit(() -> { try { api.locationStatus(); return 0; } catch(RainApi.Failure e) { return e.code; } }); assertTrue(oldRequested.await(5,TimeUnit.SECONDS)); api.checkin("new"); release.countDown(); assertEquals(Integer.valueOf(401),result.get(5,TimeUnit.SECONDS)); assertEquals("new",api.lesson()); assertNotNull(cache.read(api.host(),api.user().optString("user_id"),"new")); assertNotNull(cache.read(api.host(),api.user().optString("user_id"),"old"));
             } finally { release.countDown(); worker.shutdownNow(); api.close(); }
+        }
+    }
+    @Test public void lessonFinishedMessageRetainsStoredClassroomCredentials() throws Exception {
+        try(MockWebServer server=new MockWebServer()) { server.start(); RainApi api=new RainApi(server.url("/"),new Store()); Lessons lessons=new Lessons(); api.configure(lessons); profile(server); api.profile(); server.takeRequest(); join(server); api.checkin("ended-lesson"); server.takeRequest(); CountDownLatch finished=new CountDownLatch(1);
+            server.enqueue(new MockResponse().withWebSocketUpgrade(new WebSocketListener() { @Override public void onMessage(WebSocket ws,String value) { try { if(new JSONObject(value).optString("op").equals("hello")) ws.send("{\"op\":\"lessonfinished\"}"); } catch(Exception e) { throw new AssertionError(e); } } @Override public void onClosing(WebSocket ws,int code,String reason) { ws.close(code,reason); } }));
+            api.connect(event -> { if(event.optBoolean("finished")) finished.countDown(); }); assertTrue(finished.await(5,TimeUnit.SECONDS)); assertNotNull(lessons.read(api.host(),api.user().optString("user_id"),"ended-lesson")); api.close();
         }
     }
     @Test public void customUserAgentAppliesToHttpAssetsAndNextWebSocketHandshake() throws Exception {

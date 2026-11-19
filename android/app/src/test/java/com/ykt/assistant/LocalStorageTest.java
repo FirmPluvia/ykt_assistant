@@ -45,20 +45,22 @@ public class LocalStorageTest {
         cache.session().write("changjiang.yuketang.cn","account-a","lesson-a",credentials()); File[] files=directory.listFiles(); assertEquals(1,files.length); String disk=new String(Files.readAllBytes(files[0].toPath()),StandardCharsets.UTF_8); assertFalse(disk.contains("private-bearer-fixture")); assertFalse(disk.contains("private-socket-fixture"));
         RainApi.LessonStorage restored=new LessonCache(directory,prefs,crypto,clock::get).session(); assertEquals("private-bearer-fixture",restored.read("changjiang.yuketang.cn","account-a","lesson-a").getString("bearer")); assertNull(restored.read("pro.yuketang.cn","account-a","lesson-a")); assertNull(restored.read("changjiang.yuketang.cn","account-b","lesson-a")); assertNull(restored.read("changjiang.yuketang.cn","account-a","lesson-b"));
     }
-    @Test public void expiredAndFutureDatedCredentialsAreRemoved() throws Exception {
-        RainApi.LessonStorage store=cache.session(); store.write("host","account","lesson",credentials()); clock.addAndGet(LessonCache.MAX_AGE); assertNull(store.read("host","account","lesson")); assertEquals(0,directory.listFiles().length);
-        store.write("host","account","lesson",credentials()); clock.decrementAndGet(); assertNull(store.read("host","account","lesson"));
+    @Test public void credentialsRemainReadableAfterManyYearsAndClockChanges() throws Exception {
+        RainApi.LessonStorage store=cache.session(); store.write("host","account","lesson",credentials()); clock.addAndGet(30L*365*24*60*60*1000); assertNotNull(store.read("host","account","lesson")); assertEquals(1,directory.listFiles().length); clock.set(1); assertNotNull(store.read("host","account","lesson"));
     }
-    @Test public void LogoutRevocationSurvivesRestartAndRejectsLateWrites() throws Exception {
-        RainApi.LessonStorage old=cache.session(); old.write("host","account","lesson",credentials()); cache.revoke(); old.write("host","account","other",credentials()); assertNull(old.read("host","account","lesson"));
-        RainApi.LessonStorage fresh=new LessonCache(directory,prefs,crypto,clock::get).session(); assertNull(fresh.read("host","account","lesson")); fresh.write("host","account","new",credentials()); cache.purgeRevoked(); assertNotNull(fresh.read("host","account","new")); assertEquals(1,directory.listFiles().length);
+    @Test public void logoutRetainsFilesForSameAccountAndNewSessionWhileRejectingOldClients() throws Exception {
+        RainApi.LessonStorage old=cache.session(); old.write("host","account","lesson",credentials()); cache.revoke(); old.write("host","account","other",credentials()); assertNull(old.read("host","account","lesson")); assertNotNull(cache.session().read("host","account","lesson"));
+        RainApi.LessonStorage fresh=new LessonCache(directory,prefs,crypto,clock::get).session(); assertNotNull(fresh.read("host","account","lesson")); assertNull(fresh.read("host","another-account","lesson")); assertNull(fresh.read("host","account","other")); assertEquals(1,directory.listFiles().length);
+    }
+    @Test public void logoutDuringEncryptionCannotOverwriteRetainedCredential() throws Exception {
+        cache.session().write("host","account","lesson",credentials()); java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1); LessonCache slow=new LessonCache(directory,prefs,new LessonCache.Crypto() {
+            public byte[] seal(byte[] plain,byte[] aad) throws Exception { entered.countDown(); release.await(3,java.util.concurrent.TimeUnit.SECONDS); return crypto.seal(plain,aad); }
+            public byte[] open(byte[] data,byte[] aad) throws Exception { return crypto.open(data,aad); }
+        },clock::get); RainApi.LessonStorage stale=slow.session(); java.util.concurrent.ExecutorService executor=java.util.concurrent.Executors.newSingleThreadExecutor();
+        try { java.util.concurrent.Future<?> task=executor.submit(()-> { try { stale.write("host","account","lesson",RainApi.object("bearer","late","lessonToken","late")); } catch(Exception e) { throw new RuntimeException(e); } }); assertTrue(entered.await(3,java.util.concurrent.TimeUnit.SECONDS)); slow.revoke(); release.countDown(); task.get(3,java.util.concurrent.TimeUnit.SECONDS); assertEquals("private-bearer-fixture",slow.session().read("host","account","lesson").getString("bearer")); } finally { release.countDown(); executor.shutdownNow(); }
     }
     @Test public void TamperedCredentialCannotBeRestored() throws Exception {
-        RainApi.LessonStorage store=cache.session(); store.write("host","account","lesson",credentials()); File file=directory.listFiles()[0]; byte[] bytes=Files.readAllBytes(file.toPath()); bytes[bytes.length-1]^=1; Files.write(file.toPath(),bytes); assertNull(store.read("host","account","lesson")); assertFalse(file.exists());
+        RainApi.LessonStorage store=cache.session(); store.write("host","account","lesson",credentials()); File file=directory.listFiles()[0]; byte[] bytes=Files.readAllBytes(file.toPath()); bytes[bytes.length-1]^=1; Files.write(file.toPath(),bytes); assertNull(store.read("host","account","lesson")); assertTrue(file.exists());
     }
-    @Test public void retiredLogCleanupPreservesClassroomCredentials() throws Exception {
-        RainApi.LessonStorage store=cache.session(); store.write("host","account","lesson",credentials());
-        File logs=new File(temp.getRoot(),"logs"),day=new File(logs,"2026-10-31"); assertTrue(day.mkdirs()); Files.write(new File(day,"app.log").toPath(),"retired-log".getBytes(StandardCharsets.UTF_8));
-        LegacyLogCleanup.remove(logs); assertFalse(logs.exists()); assertNotNull(store.read("host","account","lesson"));
-    }
+
 }
