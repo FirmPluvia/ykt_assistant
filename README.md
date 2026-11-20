@@ -10,4 +10,4 @@
 | 动态与 PPT | 在「动态」按课程或类型筛选。课堂可查看签到和课件，支持保存单页、图片版 PPTX 或 ZIP。[动态查看与筛选](docs/activity-cache.md) · [课件查看与保存](docs/slides.md) |
 | 登录与多账号 | 支持二维码、账号密码、短信验证码及 Cookie。在「我的 → 账号管理」添加或切换账号，同服务器账号可同步签到和答题。[登录帮助](docs/account-login.md) · [账号管理](docs/multiple-accounts.md) · [同步请求](docs/request-sync.md) |
 
-[本机构建](android/README.md) · [安装包下载](https://share.feijipan.com/s/W6zjhil0)
+[本机构建](android/README.md) · [安装包下载](https://github.com/FirmPluvia/ykt_assistant/releases/tag/v4.0)
